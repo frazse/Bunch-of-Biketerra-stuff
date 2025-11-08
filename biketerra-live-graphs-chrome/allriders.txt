@@ -1,0 +1,218 @@
+// ==UserScript==
+// @name         Biketerra Show Riders on Graph
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Shows the position of all other riders on the elevation graph (made with Chatgpt)
+// @author       Josef N
+// @match        https://biketerra.com/ride*
+// @match        https://biketerra.com/spectate/*
+// @exclude      https://biketerra.com/dashboard
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=biketerra.com
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function() {
+    'use strict';
+    console.log("[All Rider Overlay] Script started");
+
+    const checkInterval = 500; // ms
+    let routeLength = 0;
+    let overlay, logContainer, startLine, endLine, myPosLine;
+    let currentMyX = 0;
+    let riderLines = [];
+
+    // Hämta rutten längd
+    function getRouteLength() {
+        const statsGrid = document.querySelector('.stats-grid');
+        if (statsGrid) {
+            const statRows = statsGrid.querySelectorAll('.stat-row.svelte-1wfcwp8');
+            if (statRows.length >= 3) {
+                const avgValueEl = statRows[2].querySelector('.stat-row-split.stat-avg .avg-value.svelte-1wfcwp8');
+                if (avgValueEl) {
+                    const value = parseFloat(avgValueEl.textContent.trim());
+                    if (!isNaN(value)) {
+                        routeLength = value;
+                        console.log("[All Rider Overlay] Route length set to", routeLength, "km");
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    // Vänta tills rutten finns innan vi fortsätter
+    function waitForRouteLength() {
+        const check = setInterval(() => {
+            if (getRouteLength()) {
+                clearInterval(check);
+                console.log("[All Rider Overlay] Route length loaded!");
+                startOverlayLoop();
+            }
+        }, 500);
+        // säkerhets-timeout om sidan inte laddas rätt
+        setTimeout(() => {
+            if (routeLength === 0) {
+                routeLength = 25.26;
+                console.warn("[All Rider Overlay] Fallback route length used:", routeLength);
+                clearInterval(check);
+                startOverlayLoop();
+            }
+        }, 10000);
+    }
+
+    // Skapa overlay och logik (samma som innan)
+    function createOverlay() {
+        if (overlay) return overlay;
+        overlay = document.createElement('div');
+        Object.assign(overlay.style, {
+            position: 'fixed',
+            bottom: '8px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            width: '50vw',
+            height: '95px',
+            background: 'rgba(0,0,0,0.0)',
+            zIndex: '9999',
+            border: '1px solid black',
+            borderRadius: '6px',
+            cursor: 'default',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            overflow: 'hidden'
+        });
+        document.body.appendChild(overlay);
+
+        logContainer = document.createElement('div');
+        Object.assign(logContainer.style, {
+            flex: '1',
+            width: '100%',
+            fontSize: '12px',
+            color: 'white',
+            overflowY: 'auto',
+            textAlign: 'center'
+        });
+        overlay.appendChild(logContainer);
+
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute('width', '100%');
+        svg.setAttribute('height', '80%');
+        overlay.appendChild(svg);
+
+        const height = overlay.clientHeight * 0.8;
+
+        startLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        startLine.setAttribute('stroke', 'white');
+        startLine.setAttribute('stroke-width', 1);
+        startLine.setAttribute('y1', 0);
+        startLine.setAttribute('y2', height);
+        svg.appendChild(startLine);
+
+        endLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        endLine.setAttribute('stroke', 'white');
+        endLine.setAttribute('stroke-width', 1);
+        endLine.setAttribute('y1', 0);
+        endLine.setAttribute('y2', height);
+        svg.appendChild(endLine);
+
+        myPosLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        myPosLine.setAttribute('stroke', 'lime');
+        myPosLine.setAttribute('stroke-width', 0);
+        myPosLine.setAttribute('y1', 0);
+        myPosLine.setAttribute('y2', height);
+        svg.appendChild(myPosLine);
+
+        window.addEventListener('resize', updateOverlay);
+        return overlay;
+    }
+
+    function getRidersPositions() {
+        const riderList = document.querySelector('.panel-rider-list');
+        if (!riderList) return [0];
+
+        const riders = riderList.querySelectorAll('.rider');
+        if (!riders.length) return [0];
+
+        let positions = [];
+        riders.forEach(rider => {
+            const distEl = rider.querySelector('.rider-distance .monospace');
+            if (!distEl) return;
+            const numberText = distEl.textContent.trim();
+            let unitText = 'km';
+            let nextNode = distEl.nextSibling;
+            while (nextNode) {
+                if (nextNode.nodeType === Node.TEXT_NODE && nextNode.textContent.trim() !== '') {
+                    unitText = nextNode.textContent.trim().toLowerCase();
+                    break;
+                }
+                nextNode = nextNode.nextSibling;
+            }
+            let value = parseFloat(numberText) || 0;
+            if (unitText.includes('meter')) value /= 1000;
+            if (numberText.startsWith('-')) value = -Math.abs(value);
+            else if (numberText.startsWith('+')) value = Math.abs(value);
+            positions.push(value);
+        });
+        return positions;
+    }
+
+    function updateOverlay() {
+        const overlay = createOverlay();
+        const svg = overlay.querySelector('svg');
+        const width = overlay.clientWidth;
+        const height = svg.clientHeight;
+
+        startLine.setAttribute('x1', 0);
+        startLine.setAttribute('x2', 0);
+        startLine.setAttribute('y2', height);
+        endLine.setAttribute('x1', width);
+        endLine.setAttribute('x2', width);
+        endLine.setAttribute('y2', height);
+
+        // Din position
+        const statsGrid = document.querySelector('.stats-grid');
+        let myPosKm = 0;
+        if (statsGrid) {
+            const statRows = statsGrid.querySelectorAll('.stat-row.svelte-1wfcwp8');
+            if (statRows.length >= 3) {
+                const avgValueEl = statRows[2].querySelector('.stat-row-split.stat-avg .avg-value.svelte-1wfcwp8');
+                if (avgValueEl) myPosKm = parseFloat(avgValueEl.textContent.trim()) || 0;
+            }
+        }
+
+        const targetMyX = ((routeLength - myPosKm) / routeLength) * width;
+        currentMyX += (targetMyX - currentMyX) * 0.2;
+        myPosLine.setAttribute('x1', currentMyX);
+        myPosLine.setAttribute('x2', currentMyX);
+        myPosLine.setAttribute('y2', height);
+
+        const riderPositions = getRidersPositions();
+        riderLines.forEach(line => line.remove());
+        riderLines = [];
+
+        riderPositions.forEach(riderKm => {
+            const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+            line.setAttribute('stroke', 'red');
+            line.setAttribute('stroke-width', 2);
+            line.setAttribute('y1', 0);
+            line.setAttribute('y2', height);
+            const targetX = ((routeLength - (myPosKm - riderKm)) / routeLength) * width;
+            line.setAttribute('x1', targetX);
+            line.setAttribute('x2', targetX);
+            svg.appendChild(line);
+            riderLines.push(line);
+        });
+
+        logContainer.textContent = `MyPos=${myPosKm.toFixed(3)}km | Riders=${riderPositions.length}`;
+    }
+
+    function startOverlayLoop() {
+        createOverlay();
+        setInterval(updateOverlay, checkInterval);
+    }
+
+    waitForRouteLength();
+})();

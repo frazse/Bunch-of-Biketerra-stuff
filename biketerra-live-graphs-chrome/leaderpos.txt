@@ -1,0 +1,203 @@
+// ==UserScript==
+// @name         Biketerra LeaderOverlay
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Shows the leaders position on the elevation graph  (made with Chatgpt)
+// @author       Josef N
+// @match        https://biketerra.com/ride*
+// @match        https://biketerra.com/spectate/*
+// @exclude      https://biketerra.com/dashboard
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=biketerra.com
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function() {
+    'use strict';
+    console.log("[Leader Overlay] Script started");
+
+    const checkInterval = 500; // ms
+    let routeLength = 0;
+    let overlay, logContainer, startLine, endLine, leaderLine, myPosLine;
+    let currentMyX = 0, currentLeaderX = 0;
+
+    // Hämtar leader och min position
+    function getLeaderAndMyPos() {
+        let leaderKm = 0;
+
+        const ridersMain = document.querySelector('.riders-main');
+        if (ridersMain) {
+            const firstRider = ridersMain.querySelector('.rider');
+            if (firstRider) {
+                const leaderDistanceEl = firstRider.querySelector('.rider-distance .monospace');
+                if (leaderDistanceEl) {
+                    const numberText = leaderDistanceEl.textContent.trim();
+
+                    // Läs nästa textnod efter .monospace
+                    let unitText = 'km';
+                    let nextNode = leaderDistanceEl.nextSibling;
+                    while (nextNode) {
+                        if (nextNode.nodeType === Node.TEXT_NODE && nextNode.textContent.trim() !== '') {
+                            unitText = nextNode.textContent.trim().toLowerCase();
+                            break;
+                        }
+                        nextNode = nextNode.nextSibling;
+                    }
+
+                    let value = parseFloat(numberText) || 0;
+                    if (unitText.includes('meter')) value /= 1000;
+
+                    if (numberText.startsWith('-')) leaderKm = -value;
+                    else if (numberText.startsWith('+')) leaderKm = value;
+                    else leaderKm = value;
+                } else {
+                    leaderKm = 0; // fallback if .monospace not found
+                }
+            } else {
+                leaderKm = 0; // fallback if no .rider found
+            }
+        } else {
+            leaderKm = 0; // fallback if no .riders-main
+        }
+
+        // Din position (to go)
+        const statsGrid = document.querySelector('.stats-grid');
+        let myPosKm = 0;
+        if (statsGrid) {
+            const statRows = statsGrid.querySelectorAll('.stat-row.svelte-1wfcwp8');
+            if (statRows.length >= 3) {
+                const avgValueEl = statRows[2].querySelector('.stat-row-split.stat-avg .avg-value.svelte-1wfcwp8');
+                if (avgValueEl) {
+                    myPosKm = parseFloat(avgValueEl.textContent.trim()) || 0;
+
+                    // Sätt routeLength första gången
+                    if (routeLength === 0) {
+                        routeLength = myPosKm;
+                        console.log("[Leader Overlay] Route length detected:", routeLength, "km");
+                    }
+                }
+            }
+        }
+
+        return { leaderKm, myPosKm };
+    }
+
+    // Skapar overlay
+    function createOverlay() {
+        if (overlay) return overlay;
+
+        overlay = document.createElement('div');
+        overlay.id = 'leaderOverlay';
+        Object.assign(overlay.style, {
+            position: 'fixed',
+            bottom: '8px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            width: '50vw',
+            height: '95px',
+            background: 'rgba(0,0,0,0.0)',
+            zIndex: '9999',
+            border: '1px solid black',
+            borderRadius: '6px',
+            cursor: 'default',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            overflow: 'hidden'
+        });
+        document.body.appendChild(overlay);
+
+        // Loggcontainer
+        logContainer = document.createElement('div');
+        Object.assign(logContainer.style, {
+            flex: '1',
+            width: '100%',
+            fontSize: '12px',
+            color: 'white',
+            overflowY: 'auto',
+            textAlign: 'center'
+        });
+        overlay.appendChild(logContainer);
+
+        // SVG-graf
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute('width', '100%');
+        svg.setAttribute('height', '80%');
+        overlay.appendChild(svg);
+
+        const height = overlay.clientHeight * 0.8;
+
+        // Vita start- och slutstreck
+        startLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        startLine.setAttribute('stroke', 'white');
+        startLine.setAttribute('stroke-width', 1);
+        svg.appendChild(startLine);
+
+        endLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        endLine.setAttribute('stroke', 'white');
+        endLine.setAttribute('stroke-width', 1);
+        svg.appendChild(endLine);
+
+        // Din position (lime)
+        myPosLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        myPosLine.setAttribute('y1', 0);
+        myPosLine.setAttribute('y2', height);
+        myPosLine.setAttribute('stroke', 'lime');
+        myPosLine.setAttribute('stroke-width', 0);
+        svg.appendChild(myPosLine);
+
+        // Leader (röd)
+        leaderLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        leaderLine.setAttribute('y1', 0);
+        leaderLine.setAttribute('y2', height);
+        leaderLine.setAttribute('stroke', 'red');
+        leaderLine.setAttribute('stroke-width', 2);
+        svg.appendChild(leaderLine);
+
+        new ResizeObserver(() => updateOverlay()).observe(overlay);
+
+        return overlay;
+    }
+
+    // Uppdaterar overlay
+    function updateOverlay() {
+        const overlay = createOverlay();
+        const pos = getLeaderAndMyPos();
+
+        logContainer.textContent = `Leader km=${pos.leaderKm.toFixed(3)} | MyPos km=${pos.myPosKm.toFixed(3)}`;
+
+        const svg = overlay.querySelector('svg');
+        const width = overlay.clientWidth;
+        const height = svg.clientHeight;
+
+        startLine.setAttribute('x1', 0);
+        startLine.setAttribute('x2', 0);
+        startLine.setAttribute('y1', 0);
+        startLine.setAttribute('y2', height);
+
+        endLine.setAttribute('x1', width);
+        endLine.setAttribute('x2', width);
+        endLine.setAttribute('y1', 0);
+        endLine.setAttribute('y2', height);
+
+        if (routeLength === 0) return; // skip until we have valid route length
+
+        const targetMyX = ((routeLength - pos.myPosKm) / routeLength) * width;
+        const leaderAbs = pos.myPosKm - pos.leaderKm;
+        const targetLeaderX = ((routeLength - leaderAbs) / routeLength) * width;
+
+        currentMyX += (targetMyX - currentMyX) * 0.2;
+        currentLeaderX += (targetLeaderX - currentLeaderX) * 0.2;
+
+        myPosLine.setAttribute('x1', currentMyX);
+        myPosLine.setAttribute('x2', currentMyX);
+        myPosLine.setAttribute('y2', height);
+
+        leaderLine.setAttribute('x1', currentLeaderX);
+        leaderLine.setAttribute('x2', currentLeaderX);
+        leaderLine.setAttribute('y2', height);
+    }
+
+    setInterval(updateOverlay, checkInterval);
+})();
