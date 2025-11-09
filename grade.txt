@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Biketerra LeaderOverlay + Climbs + Flat + List (Merge + Correct Height v1)
+// @name         Biketerra LeaderOverlay + Climbs
 // @namespace    http://tampermonkey.net/
 // @version      1.0
 // @description  Leader overlay + climbs + flats + segment list - merge climbs <0.25km appart and include short flats between climbs; correct height calculation (counts all positive dy)
-// @author       Josef N
+// @author       Josef N/Chatgpt
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate/*
 // @exclude      https://biketerra.com/dashboard
@@ -14,6 +14,210 @@
 (function() {
     'use strict';
     console.log("[Leader Overlay] Merge+Height v1 started");
+
+function createManualRouteSettings() {
+    const container = document.createElement('div');
+    container.style.cssText += 'display: none !important;';
+
+    container.id = 'manualRouteContainer';
+    Object.assign(container.style, {
+        position:'fixed',
+        top:'10px',
+        left:'50%',
+        transform:'translateX(-50%)',
+        background:'#000c',
+        padding:'6px 12px',
+        borderRadius:'6px',
+        color:'white',
+        fontSize:'12px',
+        zIndex:'9999',
+        gap:'6px',
+        alignItems:'center',
+        display:'none' // sätt display sist så inget överskriver
+    });
+
+
+    const lengthInput = document.createElement('input');
+    lengthInput.type = 'number';
+    lengthInput.min = '0';
+    lengthInput.step = '0.1';
+    lengthInput.placeholder = 'Route km';
+    lengthInput.style.width = '60px';
+
+    const climbInput = document.createElement('input');
+    climbInput.type = 'number';
+    climbInput.min = '0';
+    climbInput.step = '1';
+    climbInput.placeholder = 'Climb m';
+    climbInput.style.width = '60px';
+
+    const btn = document.createElement('button');
+    btn.textContent = 'Set';
+    Object.assign(btn.style, {cursor:'pointer', padding:'2px 6px', fontSize:'12px'});
+
+    btn.addEventListener('click', () => {
+        const len = parseFloat(lengthInput.value);
+        const climb = parseFloat(climbInput.value);
+        if(!isNaN(len) && len > 0) routeLength = len;
+        if(!isNaN(climb) && climb > 0) totalClimb = climb;
+        console.log('[Manual Route] Length:', routeLength, 'km, Climb:', totalClimb, 'm');
+
+        // --- Reset flags for rebuild ---
+        segmentListBuilt = false;
+        window.currentClimbIndex = -1;
+        window.currentClimbStartTime = null;
+        window.climbFinishedTime = null;
+
+        // --- Compute primitives and scale ---
+        let primitives = computePrimitives();
+        if(primitives.length){
+            let totalPosY = primitives.reduce((sum,p) => sum + (p.dyM>0?p.dyM:0),0);
+            const scale = totalPosY>0 ? (totalClimb / totalPosY) : 1;
+
+            primitives.forEach(p => {
+                p.dxKm = (p.end - p.start) * routeLength;
+                p.dyM *= scale;
+                p.avgSlope = (p.dxKm>0) ? (p.dyM / (p.dxKm*1000))*100 : 0;
+
+                // grade
+                if(p.avgSlope >= 40) p.grade='a';
+                else if(p.avgSlope >= 20) p.grade='b';
+                else if(p.avgSlope >= 10) p.grade='c';
+                else if(p.avgSlope >= 5)  p.grade='d';
+                else if(p.avgSlope>0)      p.grade='e';
+                else                       p.grade='flat';
+            });
+        }
+
+        // --- Build blocks & merge climbs ---
+        const blocks = buildBlocks(primitives);
+        const mergedClimbs = mergeClimbsAndShortFlats(blocks);
+
+        // --- Draw segments (build segmentlist again) ---
+        drawSegments(mergedClimbs, primitives);
+
+        // --- Update climb progress ---
+        const pos = getLeaderAndMyPos(false);
+
+     let climbsToShow = mergedClimbs.filter(c => c.avgSlope >= DISPLAY_SLOPE_THRESHOLD);
+
+// Hitta climb där vi är just nu
+const activeClimb = mergedClimbs.find(c => {
+    const climbStartInv = routeLength - c.start * routeLength;
+    const climbEndInv = routeLength - c.end * routeLength;
+    return pos.myPosKm <= climbStartInv && pos.myPosKm >= climbEndInv;
+});
+
+// Lägg alltid till activeClimb om vi befinner oss på den
+if(activeClimb && !climbsToShow.includes(activeClimb)){
+    climbsToShow.unshift(activeClimb);
+}
+
+
+        updateClimbProgress(mergedClimbs, pos.myPosKm);
+
+        // --- Move climb progress overlay above segment list ---
+        if(window.climbProgressOverlay && segmentListOverlay){
+            const rect = segmentListOverlay.getBoundingClientRect();
+            window.climbProgressOverlay.style.bottom = `${window.innerHeight - rect.top + 8}px`;
+        }
+    });
+
+    container.appendChild(lengthInput);
+    container.appendChild(climbInput);
+    container.appendChild(btn);
+    document.body.appendChild(container);
+}
+    let maxMyPosKmSeen = 0; // högsta position vi sett under körning
+function rebuildSegmentList(mergedClimbs, primitives) {
+    // skapa overlay om den inte finns
+    if (!segmentListOverlay) createSegmentListOverlay();
+    if (!segmentListContainer) createSegmentListOverlay();
+
+    // tvinga rebuild
+    segmentListContainer.innerHTML = '';
+
+    let displayIndex = 1;
+    for (let m of mergedClimbs) {
+        if (m.avgSlope < DISPLAY_SLOPE_THRESHOLD) continue;
+
+        const startKm = (m.start * routeLength) || 0;
+        const endKm = (m.end * routeLength) || 0;
+        const lenKm = Math.max(0, endKm - startKm);
+
+        const div = document.createElement('div');
+        div.style.display = 'flex';
+        div.style.justifyContent = 'space-between';
+        div.style.padding = '4px 0';
+        div.style.borderBottom = '1px dashed rgba(255,255,255,0.04)';
+        div.style.whiteSpace = 'nowrap';
+        div.style.overflow = 'hidden';
+        div.style.textOverflow = 'ellipsis';
+
+        const colStyle = 'flex:1; text-align:right; overflow:hidden; text-overflow:ellipsis;';
+
+        div.innerHTML = `
+            <div style="flex:1; text-align:left;">#${displayIndex} CLIMB</div>
+            <div style="${colStyle}">${startKm.toFixed(2)}→${endKm.toFixed(2)} km</div>
+            <div style="${colStyle}">${lenKm.toFixed(2)} km</div>
+            <div style="${colStyle}">${m.dyM.toFixed(0)} m</div>
+            <div style="${colStyle}">${m.avgSlope.toFixed(2)}%</div>
+        `;
+        segmentListContainer.appendChild(div);
+
+        displayIndex++;
+    }
+}
+function autoUpdateSegmentList(pos) {
+    if (!routeLength) return;
+
+    const primitives = computePrimitives();
+    const blocks = buildBlocks(primitives);
+    const mergedClimbs = mergeClimbsAndShortFlats(blocks);
+
+    // Bygg segmentlistan alltid
+    segmentListBuilt = false;
+    drawSegments(mergedClimbs, primitives);
+    segmentListBuilt = true;
+
+    // Uppdatera climb progress
+    updateClimbProgress(mergedClimbs, pos.myPosKm);
+}
+
+function autoUpdateIfReachedMax(pos) {
+    if(pos.myPosKm >= routeLength && pos.myPosKm > maxMyPosKmSeen) {
+        maxMyPosKmSeen = pos.myPosKm;
+        console.log("[Auto Update] myPosKm >= routeLength, kör uppdatering");
+
+        // --- Reset flags for rebuild ---
+        window.currentClimbIndex = -1;
+        window.currentClimbStartTime = null;
+        window.climbFinishedTime = null;
+
+        const primitives = computePrimitives();
+        if(primitives.length){
+            let totalPosY = primitives.reduce((sum,p) => sum + (p.dyM>0?p.dyM:0),0);
+            const scale = totalClimb / totalPosY;
+            primitives.forEach(p => {
+                p.dxKm = (p.end - p.start) * routeLength;
+                p.dyM *= scale;
+                p.avgSlope = (p.dxKm>0) ? (p.dyM / (p.dxKm*1000))*100 : 0;
+            });
+        }
+
+        const blocks = buildBlocks(primitives);
+        const mergedClimbs = mergeClimbsAndShortFlats(blocks);
+
+        // --- Temporärt tvinga segmentlistan att byggas ---
+        const oldFlag = segmentListBuilt;
+        segmentListBuilt = false;
+        drawSegments(mergedClimbs, primitives); // bygger listan
+        segmentListBuilt = true; // sätt tillbaka flaggan
+
+rebuildSegmentList(mergedClimbs, primitives);
+updateClimbProgress(mergedClimbs, pos.myPosKm);
+    }
+}
 
     const checkInterval = 500; // ms
     const MERGE_GAP_KM = 0.25; // merge threshold
@@ -97,43 +301,90 @@
     }
 
     // --- Overlay UI creation
-    function createOverlay() {
-        if(overlay) return overlay;
+function createOverlay() {
+    if(overlay) return overlay;
 
-        overlay = document.createElement('div');
-        Object.assign(overlay.style,{
-            position:'fixed', bottom:'8px', left:'50%', transform:'translateX(-50%)',
-            width:'50vw', height:'95px', background:'rgba(0,0,0,0.0)',
-            zIndex:'9999', border:'1px solid rgba(255,255,255,0.05)', borderRadius:'6px',
-            cursor:'default', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center',
-            overflow:'hidden', color: 'white'
-        });
-        document.body.appendChild(overlay);
+    // --- Skapa overlay först ---
+    overlay = document.createElement('div');
+    Object.assign(overlay.style,{
+        position:'fixed',
+        bottom:'8px',
+        left:'50%',
+        transform:'translateX(-50%)',
+        width:'50vw',
+        height:'95px',
+        background:'rgba(0,0,0,0.0)',
+        zIndex:'9999',
+        border:'1px solid rgba(255,255,255,0.05)',
+        borderRadius:'6px',
+        cursor:'default',
+        display:'flex',
+        flexDirection:'column',
+        alignItems:'center',
+        justifyContent:'center',
+        overflow:'hidden',
+        color: 'white'
+    });
+    document.body.appendChild(overlay);
 
-        logContainer = document.createElement('div');
-        Object.assign(logContainer.style,{
-            flex:'1', width:'100%', fontSize:'12px', color:'white', overflowY:'auto', textAlign:'center'
-        });
-        overlay.appendChild(logContainer);
+    // --- Log container ---
+    logContainer = document.createElement('div');
+    Object.assign(logContainer.style,{
+        flex:'1',
+        width:'100%',
+        fontSize:'12px',
+        color:'white',
+        overflowY:'auto',
+        textAlign:'center'
+    });
+    overlay.appendChild(logContainer);
 
-        const svg = document.createElementNS("http://www.w3.org/2000/svg","svg");
-        svg.setAttribute('width','100%'); svg.setAttribute('height','100%');
-        overlay.appendChild(svg);
+    // --- SVG för linjer ---
+    const svg = document.createElementNS("http://www.w3.org/2000/svg","svg");
+    svg.setAttribute('width','100%');
+    svg.setAttribute('height','100%');
+    overlay.appendChild(svg);
 
-        const height = overlay.clientHeight * 0.8;
+    const height = overlay.clientHeight * 0.8;
 
-        myPosLine = document.createElementNS("http://www.w3.org/2000/svg","line");
-        myPosLine.setAttribute('y1',0); myPosLine.setAttribute('y2',height);
-        myPosLine.setAttribute('stroke','lime'); myPosLine.setAttribute('stroke-width',0);
-        svg.appendChild(myPosLine);
+    myPosLine = document.createElementNS("http://www.w3.org/2000/svg","line");
+    myPosLine.setAttribute('y1',0);
+    myPosLine.setAttribute('y2',height);
+    myPosLine.setAttribute('stroke','lime');
+    myPosLine.setAttribute('stroke-width',0);
+    svg.appendChild(myPosLine);
 
-        leaderLine = document.createElementNS("http://www.w3.org/2000/svg","line");
-        leaderLine.setAttribute('y1',0); leaderLine.setAttribute('y2',height);
-        leaderLine.setAttribute('stroke','red'); leaderLine.setAttribute('stroke-width',2);
-        svg.appendChild(leaderLine);
+    leaderLine = document.createElementNS("http://www.w3.org/2000/svg","line");
+    leaderLine.setAttribute('y1',0);
+    leaderLine.setAttribute('y2',height);
+    leaderLine.setAttribute('stroke','red');
+    leaderLine.setAttribute('stroke-width',2);
+    svg.appendChild(leaderLine);
 
-        return overlay;
-    }
+    // --- Hamburger-meny knapp ---
+    const menuBtn = document.createElement('div');
+    menuBtn.textContent = '☰';
+    Object.assign(menuBtn.style, {
+        position: 'absolute',
+        top: '2px',
+        left: '4px',
+        cursor: 'pointer',
+        fontSize: '12px',
+        color: 'lightgrey',
+        userSelect: 'none'
+    });
+
+    menuBtn.addEventListener('click', () => {
+        const container = document.getElementById('manualRouteContainer');
+        if(container){
+            container.style.display = (container.style.display === 'none') ? 'flex' : 'none';
+        }
+    });
+
+    overlay.appendChild(menuBtn);
+
+    return overlay;
+}
 
     function createSegmentListOverlay() {
         if(segmentListOverlay) return segmentListOverlay;
@@ -409,7 +660,19 @@ function updateClimbProgress(mergedClimbs, myPosKm) {
         return;
     }
 
-    const climbsToShow = mergedClimbs.filter(c => c.avgSlope >= DISPLAY_SLOPE_THRESHOLD);
+    // Hitta aktuell climb (mitt i climb)
+    const activeClimb = mergedClimbs.find(c => {
+        const climbStartInv = routeLength - c.start * routeLength;
+        const climbEndInv = routeLength - c.end * routeLength;
+        return myPosKm <= climbStartInv && myPosKm >= climbEndInv;
+    });
+
+    // Filtrera climbs för segmentlistan / kommande climbs
+    let climbsToShow = mergedClimbs.filter(c => c.avgSlope >= DISPLAY_SLOPE_THRESHOLD);
+    if (activeClimb && !climbsToShow.includes(activeClimb)) {
+        climbsToShow.unshift(activeClimb); // alltid visa aktuell climb
+    }
+
     if (!climbsToShow.length) {
         textDiv.textContent = 'No climbs above threshold';
         bar.style.width = '0%';
@@ -417,33 +680,19 @@ function updateClimbProgress(mergedClimbs, myPosKm) {
         return;
     }
 
-    // Hämta aktuell speed
-    let speedKPH = 0;
-    const statsGrid = document.querySelector('.stats-grid');
-    if (statsGrid) {
-        const statRows = statsGrid.querySelectorAll('.stat-row.svelte-1wfcwp8');
-        if (statRows.length >= 1) {
-            const speedEl = statRows[0].querySelector('.stat-row-split.stat-avg .avg-value.svelte-1wfcwp8');
-            if (speedEl) {
-                let value = parseFloat(speedEl.textContent.trim()) || 0;
-                speedKPH = value;
-            }
-        }
-    }
-
+    // Hitta nästa climb för progress
     let nextClimb = null;
     let nextIndex = -1;
-
     for (let i = 0; i < climbsToShow.length; i++) {
         const climb = climbsToShow[i];
         const climbStartInv = routeLength - climb.start * routeLength;
-        const climbEndInv   = routeLength - climb.end * routeLength;
+        const climbEndInv = routeLength - climb.end * routeLength;
 
-        if (myPosKm > climbStartInv) {
+        if (myPosKm <= climbStartInv && myPosKm >= climbEndInv) {
             nextClimb = climb;
             nextIndex = i;
             break;
-        } else if (myPosKm <= climbStartInv && myPosKm >= climbEndInv) {
+        } else if (myPosKm > climbStartInv) {
             nextClimb = climb;
             nextIndex = i;
             break;
@@ -451,7 +700,6 @@ function updateClimbProgress(mergedClimbs, myPosKm) {
     }
 
     if (!nextClimb) {
-        // visa sista climb-tiden i 10 sekunder om den precis slutat
         if (window.climbFinishedTime && Date.now() - window.climbFinishedTime < 10000) {
             textDiv.textContent = window.lastClimbText || 'Finished all climbs';
             bar.style.width = '100%';
@@ -483,13 +731,24 @@ function updateClimbProgress(mergedClimbs, myPosKm) {
         window.currentClimbStartTime = null;
         window.currentClimbIndex = -1;
     } else if (myPosKm <= climbStartInv && myPosKm >= climbEndInv) {
-        // på climb
+        // på climb – IGNORERA DISPLAY_SLOPE_THRESHOLD
         const climbRemainingKm = myPosKm - climbEndInv;
         const climbTotalKm     = climbStartInv - climbEndInv;
         const climbRemainingM  = nextClimb.dyM * (climbRemainingKm / climbTotalKm);
 
-        // average grade kvar
-        const avgSlopeRemaining = climbRemainingM / (climbRemainingKm * 1000) * 100;
+        // --- NYTT: avg slope remaining ---
+        const avgSlopeRemaining = (climbRemainingKm > 0) ? (climbRemainingM / (climbRemainingKm * 1000)) * 100 : 0;
+
+        // Hämta aktuell speed för ETA
+        let speedKPH = 0;
+        const statsGrid = document.querySelector('.stats-grid');
+        if (statsGrid) {
+            const statRows = statsGrid.querySelectorAll('.stat-row.svelte-1wfcwp8');
+            if (statRows.length >= 1) {
+                const speedEl = statRows[0].querySelector('.stat-row-split.stat-avg .avg-value.svelte-1wfcwp8');
+                if (speedEl) speedKPH = parseFloat(speedEl.textContent.trim()) || 0;
+            }
+        }
 
         // tid kvar
         let timeRemainingText = '--';
@@ -500,9 +759,8 @@ function updateClimbProgress(mergedClimbs, myPosKm) {
             timeRemainingText = `${minutes}m ${seconds}s`;
         }
 
-        // --- Climb duration ---
+        // starta ny climb om den är ny
         if (window.currentClimbIndex !== nextIndex) {
-            // ny climb start
             window.currentClimbStartTime = now;
             window.currentClimbIndex = nextIndex;
             window.climbFinishedTime = null;
@@ -516,8 +774,7 @@ function updateClimbProgress(mergedClimbs, myPosKm) {
             elapsedText = ` | Duration: ${elapsedMin}m ${elapsedRem}s`;
         }
 
-        displayText = `Climb #${nextIndex + 1} remaining: ${climbRemainingKm.toFixed(2)} km | ${climbRemainingM.toFixed(2)} m | Avg: ${avgSlopeRemaining.toFixed(2)}% | ETA: ${timeRemainingText}${elapsedText}`;
-
+        displayText = `Climb #${nextIndex + 1} remaining: ${climbRemainingKm.toFixed(2)} km | ${climbRemainingM.toFixed(2)} m | Avg Grade: ${avgSlopeRemaining.toFixed(2)}% | ETA: ${timeRemainingText}${elapsedText}`;
         progressPercent = ((climbTotalKm - climbRemainingKm) / climbTotalKm) * 100;
 
         let grade = 'e';
@@ -525,7 +782,7 @@ function updateClimbProgress(mergedClimbs, myPosKm) {
         else if (nextClimb.avgSlope >= 20) grade='b';
         else if (nextClimb.avgSlope >= 10) grade='c';
         else if (nextClimb.avgSlope >= 5)  grade='d';
-        else grade='e';
+
         bgColor = getGradeColor(grade) + '88';
     }
 
@@ -631,7 +888,9 @@ segmentListContainer.appendChild(div);
     function updateOverlay() {
         const overlayEl = createOverlay();
         const pos = getLeaderAndMyPos(false);
-
+if (pos.myPosKm >= routeLength) {
+    autoUpdateSegmentList(pos);
+}
        // logContainer.textContent = `MyPos ${pos.myPosKm.toFixed(1)} km`;
 
         const svg = overlayEl.querySelector('svg');
@@ -667,10 +926,16 @@ segmentListContainer.appendChild(div);
         // draw only merged climbs that meet display threshold, and the total from primitives
         drawSegments(mergedClimbs, primitives);
         updateClimbProgress(mergedClimbs, pos.myPosKm);
-
+if(window.climbProgressOverlay && segmentListOverlay){
+            const rect = segmentListOverlay.getBoundingClientRect();
+            window.climbProgressOverlay.style.bottom = `${window.innerHeight - rect.top + 8}px`;
+        }
     }
 
     setInterval(updateOverlay, checkInterval);
     setTimeout(()=>getLeaderAndMyPos(true), 1500);
+
+// Initiera manuellt UI direkt när scriptet startar
+createManualRouteSettings();
 
 })();
