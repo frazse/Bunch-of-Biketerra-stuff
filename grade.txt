@@ -1,4 +1,23 @@
 // ==UserScript==
+// @name         Biketerra LeaderOverlay + Climbs (block on workout)
+// @namespace    http://tampermonkey.net/
+// @version      1.2
+// @description  Kör endast om .workout-wrap INTE finns, göm overlays om den dyker upp
+// @match        https://biketerra.com/ride*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+
+    // Kontrollera om workout-wrap finns
+    if(document.querySelector(".workout-wrap")) {
+        console.log("❌ workout-wrap finns – script blockerat");
+        return; // STOPP: kör inte scriptet
+    }
+
+    console.log("🏁 Script initierat – workout-wrap saknas");
+
+// ==UserScript==
 // @name         Biketerra LeaderOverlay + Climbs
 // @namespace    http://tampermonkey.net/
 // @version      1.0
@@ -937,5 +956,21 @@ if(window.climbProgressOverlay && segmentListOverlay){
 
 // Initiera manuellt UI direkt när scriptet startar
 createManualRouteSettings();
+
+})();
+
+
+    // --- OBSERVER FÖR ATT DÖLJA OM .workout-wrap DYKER UPP ---
+    const observer = new MutationObserver(() => {
+        const workoutWrapExists = !!document.querySelector(".workout-wrap");
+        if(workoutWrapExists) {
+            console.log("🛑 workout-wrap upptäckt – overlays gömda");
+            if(window.overlay) window.overlay.style.display = 'none';
+            if(window.segmentListOverlay) window.segmentListOverlay.style.display = 'none';
+            if(window.climbProgressOverlay) window.climbProgressOverlay.style.display = 'none';
+        }
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
 
 })();
