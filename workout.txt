@@ -1,0 +1,288 @@
+// ==UserScript==
+// @name         Biketerra Workout Overlay v2.1
+// @namespace    http://tampermonkey.net/
+// @version      2.1
+// @description  Workout overlay + segment list + super smooth progressbar + auto-scroll + ramp power; only when .workout-wrap exists
+// @author       Josef N/ChatGPT
+// @match        https://biketerra.com/ride*
+// @match        https://biketerra.com/spectate/*
+// @exclude      https://biketerra.com/dashboard
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function(){
+    'use strict';
+    console.log("[Workout Overlay v2.1] Started");
+
+    let overlay, segmentListOverlay, segmentListContainer, activeSegmentOverlay;
+    let segments = [];
+    let activeSegmentIndex = 0;
+    let activeSegmentRemaining = 0;
+    let currentStepIndex = -1;
+    let workoutTotalSeconds = 0;
+    let progressWidth = 0; // aktuell progress för mjuk tween
+
+    // --- Utilities ---
+    function parseTimeToSeconds(str){
+        const [min, sec] = str.split(':').map(Number);
+        return min*60 + sec;
+    }
+
+    function formatTime(sec){
+        const m = Math.floor(sec/60);
+        const s = Math.floor(sec%60);
+        return `${m}:${s.toString().padStart(2,'0')}`;
+    }
+
+    // --- Overlay creators ---
+    function createSegmentListOverlay(){
+        if(segmentListOverlay) return segmentListOverlay;
+        segmentListOverlay = document.createElement('div');
+        Object.assign(segmentListOverlay.style,{
+            position:'fixed', bottom:'111px', left:'50%', transform:'translateX(-50%)',
+            width:'32vw', maxHeight:'185px', overflowY:'auto',
+            background:'#000a', color:'white', fontSize:'12px', border:'1px solid rgba(255,255,255,0.08)',
+            borderRadius:'6px', padding:'6px', zIndex:'9999'
+        });
+        document.body.appendChild(segmentListOverlay);
+        segmentListContainer = document.createElement('div');
+        segmentListOverlay.appendChild(segmentListContainer);
+        return segmentListOverlay;
+    }
+// Lägg till detta efter att segmentListOverlay skapats
+const style = document.createElement('style');
+style.textContent = `
+/* Scrollbar för segmentListOverlay */
+div::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+div::-webkit-scrollbar-track {
+    background: rgba(0,0,0,0.2);
+    border-radius: 4px;
+}
+div::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.3);
+    border-radius: 4px;
+}
+div::-webkit-scrollbar-thumb:hover {
+    background: rgba(255,255,255,0.5);
+}
+
+/* Firefox */
+div {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,0.3) rgba(0,0,0,0.2);
+}
+`;
+document.head.appendChild(style);
+
+    function createActiveSegmentOverlay(){
+        if(activeSegmentOverlay) return activeSegmentOverlay;
+
+        const overlayDiv = document.createElement('div');
+Object.assign(overlayDiv.style, {
+    position:'fixed',
+    left:'50%',
+    transform:'translateX(-50%)',
+    background:'#000c',
+    color:'white',
+    padding:'6px 12px',
+    borderRadius:'6px',
+    fontSize:'17px',
+    fontWeight:'bold',
+    zIndex:'10000',
+    minWidth:'260px',
+    width:'32vw',
+    textAlign:'center',
+    textShadow: '1px 1px 2px black' // svart outline för texten
+});
+
+
+
+        const textDiv = document.createElement('div');
+        overlayDiv.appendChild(textDiv);
+
+        const barContainer = document.createElement('div');
+        Object.assign(barContainer.style,{
+            width:'100%', height:'12px', background:'#2228', borderRadius:'6px', overflow:'hidden', marginTop:'4px'
+        });
+
+        const bar = document.createElement('div');
+// För progressbaren
+Object.assign(bar.style, {
+    width:'0%',
+    height:'100%',
+    background:'lime',
+    borderRadius:'6px',
+    boxShadow: 'inset 0 0 2px black' // subtil svart kant på progressbaren
+});
+
+        barContainer.appendChild(bar);
+        overlayDiv.appendChild(barContainer);
+        document.body.appendChild(overlayDiv);
+
+        activeSegmentOverlay = {overlay: overlayDiv, textDiv, progressBar: bar};
+
+        function updatePosition(){
+            if(segmentListOverlay){
+                const rect = segmentListOverlay.getBoundingClientRect();
+                overlayDiv.style.bottom = `${window.innerHeight - rect.top + 8}px`;
+            } else {
+                overlayDiv.style.bottom = '440px';
+            }
+        }
+        updatePosition();
+        window.addEventListener('resize', updatePosition);
+
+        return activeSegmentOverlay;
+    }
+
+    // --- Workout data ---
+    function readWorkoutSegments(){
+        const steps = document.querySelectorAll('.workout-wrap .workout-steps .workout-step');
+        const arr = [];
+        steps.forEach(step=>{
+            const durEl = step.querySelector('.step-duration');
+            const powEl = step.querySelector('.step-power');
+            if(!durEl || !powEl) return;
+            const dur = parseTimeToSeconds(durEl.textContent.trim());
+            const powText = powEl.textContent.trim();
+            arr.push({duration: dur, powerText: powText});
+        });
+        return arr;
+    }
+
+    function buildSegmentList(segments){
+        createSegmentListOverlay();
+        segmentListContainer.innerHTML = '';
+        segments.forEach((s,i)=>{
+            const div = document.createElement('div');
+            div.style.display='flex';
+            div.style.justifyContent='space-between';
+            div.style.padding='4px 0';
+            div.style.borderBottom='1px dashed rgba(255,255,255,0.04)';
+            div.style.whiteSpace='nowrap';
+            div.style.overflow='hidden';
+            div.style.textOverflow='ellipsis';
+            const colStyle = 'flex:1; text-align:right; overflow:hidden; text-overflow:ellipsis;';
+            div.innerHTML = `<div style="flex:1;text-align:left;">#${i+1} Segment</div>
+                             <div style="${colStyle}">${formatTime(s.duration)}</div>
+                             <div style="${colStyle}">${s.powerText}</div>`;
+            segmentListContainer.appendChild(div);
+        });
+    }
+
+    function updateSegmentListActive(stepIndex){
+        if(!segmentListContainer) return;
+        const children = segmentListContainer.children;
+        for(let i=0; i<children.length; i++){
+            children[i].style.background = (i === stepIndex) ? 'rgba(255,255,255,0.15)' : 'transparent';
+        }
+        if(stepIndex >=0 && stepIndex < children.length){
+            children[stepIndex].scrollIntoView({behavior:'smooth', block:'center'});
+        }
+    }
+
+    // --- Active Segment ---
+function updateActiveSegmentOverlay(){
+    if(!segments.length || !document.querySelector('.workout-wrap')) return;
+
+    const overlayObj = createActiveSegmentOverlay();
+    const { textDiv, progressBar, overlay } = overlayObj;
+
+    const remainingEl = document.querySelector('.workout-wrap .workout-remaining .monospace');
+    if(!remainingEl) return;
+
+    if(workoutTotalSeconds === 0){
+        workoutTotalSeconds = parseTimeToSeconds(remainingEl.textContent.trim());
+    }
+
+    const workoutRemaining = parseTimeToSeconds(remainingEl.textContent.trim());
+    const elapsed = workoutTotalSeconds - workoutRemaining;
+
+    // Hitta aktivt segment
+    let cumTime = 0;
+    for(let i=0; i<segments.length; i++){
+        if(elapsed < cumTime + segments[i].duration){
+            activeSegmentIndex = i;
+            activeSegmentRemaining = (cumTime + segments[i].duration) - elapsed;
+            break;
+        }
+        cumTime += segments[i].duration;
+    }
+
+    if(activeSegmentIndex !== currentStepIndex){
+        currentStepIndex = activeSegmentIndex;
+        updateSegmentListActive(currentStepIndex);
+    }
+
+    // Ramp power
+    const powText = segments[activeSegmentIndex].powerText;
+    let currentPower = 0;
+    if(powText.includes('→')){
+        const [startStr,endStr] = powText.split('→').map(s => parseInt(s.replace('W','').trim()));
+        const segDuration = segments[activeSegmentIndex].duration;
+        const elapsedInSeg = segDuration - activeSegmentRemaining;
+        currentPower = Math.round(startStr + (endStr - startStr) * (elapsedInSeg / segDuration));
+    } else {
+        currentPower = parseInt(powText.replace('W','').trim()) || 0;
+    }
+
+    // Super-smooth progress
+    const segDuration = segments[activeSegmentIndex].duration;
+    const targetWidth = ((segDuration - activeSegmentRemaining)/segDuration)*100;
+    progressWidth += (targetWidth - progressWidth) * 0.2; // linear tween
+    progressBar.style.width = progressWidth + '%';
+    textDiv.textContent = `Power: ${currentPower} W | ${formatTime(Math.ceil(activeSegmentRemaining))}`;
+
+    // --- Polygon fill färg ---
+    const polygons = document.querySelectorAll('polygon'); // justera selektor vid behov
+    if(polygons[activeSegmentIndex]){
+        const fillColor = polygons[activeSegmentIndex].getAttribute('fill');
+        overlay.style.backgroundColor = fillColor || '#000c';
+    }
+}
+
+    // --- Init Workout ---
+    function initWorkout(){
+        segments = readWorkoutSegments();
+        if(!segments.length) return;
+        buildSegmentList(segments);
+        createActiveSegmentOverlay();
+        currentStepIndex = -1;
+        workoutTotalSeconds = 0;
+        progressWidth = 0;
+    }
+
+    // --- Observe workout-wrap ---
+    const observer = new MutationObserver(()=>{
+        const wrapExists = !!document.querySelector('.workout-wrap');
+        if(wrapExists){
+            if(!segments.length) initWorkout();
+            if(segmentListOverlay) segmentListOverlay.style.display = 'block';
+            if(activeSegmentOverlay) activeSegmentOverlay.overlay.style.display = 'block';
+        } else {
+            if(segmentListOverlay) segmentListOverlay.style.display = 'none';
+            if(activeSegmentOverlay) activeSegmentOverlay.overlay.style.display = 'none';
+            segments = [];
+            workoutTotalSeconds = 0;
+            currentStepIndex = -1;
+            progressWidth = 0;
+        }
+    });
+
+    observer.observe(document.body,{childList:true, subtree:true});
+
+    // --- Animation loop ---
+    function loop(){
+        if(segments.length && document.querySelector('.workout-wrap')){
+            updateActiveSegmentOverlay();
+        }
+        requestAnimationFrame(loop);
+    }
+
+    loop();
+
+})();
