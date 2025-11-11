@@ -224,7 +224,97 @@ function drawActiveClimbOverlay(points, climbs, total_km, myKm) {
     ctx.fillStyle = "#fff";
     ctx.font = "bold 14px Overpass, sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText(`${activeClimb.gain}m / ${activeClimb.avgGrade}%`, xCenter, 20);
+    // --- COMPUTE EXTRA CLIMB DATA ---
+
+// 1. Climb position: "Climb X/X"
+const climbIndex = climbs.indexOf(activeClimb) + 1;
+const climbTotal = climbs.length;
+
+// 2. Distance remaining on the climb
+const remainingKm = Math.max(0, activeClimb.endKm - myKm);
+const remainingMeters = Math.round(remainingKm * 1000);
+
+// 3. Avg grade remaining
+//    Recompute average grade only for the remaining portion
+let remGain = 0;
+let remDist = 0;
+for (let i = 0; i < points.length - 1; i++) {
+    const kmHere = (i / (points.length - 1)) * total_km;
+    if (kmHere < myKm || kmHere > activeClimb.endKm) continue;
+
+    const dy = points[i + 1].y - points[i].y;
+    const dx = (total_km / (points.length - 1)) * 1000;
+    if (dy > 0) remGain += dy;
+    remDist += dx;
+}
+    const remainingHeight = (activeClimb.endKm - myKm) > 0  ? activeClimb.gain * (remainingKm / (activeClimb.endKm - activeClimb.startKm)) : 0;
+// Compute remaining elevation on climb using points
+let lastY = null;
+for (let i = 0; i < points.length; i++) {
+    const kmHere = (i / (points.length - 1)) * total_km;
+    if (kmHere < myKm) continue;
+    if (kmHere > activeClimb.endKm) break;
+
+    if (lastY !== null) {
+        const dy = points[i].y - lastY;
+        if (dy > 0) remainingHeight += dy * total_climb; // scale by total climb
+    }
+    lastY = points[i].y;
+}
+
+// Remaining distance in meters
+const remainingDistMeters = remainingKm * 1000;
+
+// Remaining grade
+const remainingGrade = remainingDistMeters > 0
+    ? (remainingHeight / remainingDistMeters) * 100
+    : 0;
+
+
+// 4. Time calculations
+// Store when climb started if not already stored
+if (!activeClimb.__startTime && myKm >= activeClimb.startKm) {
+    activeClimb.__startTime = performance.now();
+}
+
+// Elapsed time
+let elapsedSec = 0;
+if (activeClimb.__startTime) {
+    elapsedSec = Math.floor((performance.now() - activeClimb.__startTime) / 1000);
+}
+const elapsedMin = Math.floor(elapsedSec / 60);
+const elapsedSec2 = elapsedSec % 60;
+
+// ETA until climb end (if rider speed is known)
+let etaStr = "??:??";
+if (window.lastSpeedKph && window.lastSpeedKph > 1) {
+    const speedMps = window.lastSpeedKph / 3.6;
+    const etaSec = Math.floor(remainingMeters / speedMps);
+    const etaMin = Math.floor(etaSec / 60);
+    const etaSec2 = etaSec % 60;
+    etaStr = `${etaMin}:${etaSec2.toString().padStart(2, "0")}`;
+}
+
+// Format elapsed as mm:ss
+const elapsedStr = `${elapsedMin}:${elapsedSec2.toString().padStart(2,'0')}`;
+
+// --- DRAW CENTERED MULTI-LINE LABEL ---
+ctx.fillStyle = "#fff";
+ctx.font = "bold 16px Overpass, sans-serif";
+ctx.textAlign = "center";
+
+ctx.fillText(
+    `Climb ${climbIndex}/${climbTotal} | Remaining: ${remainingKm.toFixed(2)} km | ${remainingGrade.toFixed(1)}%`,
+    xCenter, 20
+);
+
+
+ctx.fillText(
+    `ETA: ${etaStr} | Elapsed: ${elapsedStr}`,
+    xCenter, 38
+);
+
+ //   ctx.fillText(`${activeClimb.gain}m / ${activeClimb.avgGrade}%`, xCenter, 20);
 
 
     // --- DRAW CURRENT POSITION MARKER ---
@@ -239,6 +329,26 @@ function drawActiveClimbOverlay(points, climbs, total_km, myKm) {
         ctx.stroke();
     }
 }
+
+// Grab current speed in KPH
+function updateSpeed() {
+    const statRows = document.querySelectorAll(".stat-row");
+    if (statRows.length < 1) return null;
+
+    // statRows[0] = row with current speed
+    const speedEl = statRows[0].querySelector(".stat-row-split .stat-value");
+    if (!speedEl) return null;
+
+    const val = parseFloat(speedEl.textContent.trim().replace(",", "."));
+    if (!isNaN(val)) {
+        window.lastSpeedKph = val;
+        return val;
+    }
+
+    return null;
+}
+
+setInterval(updateSpeed, 500);
 
 function getMyKm() {
     const statRows = document.querySelectorAll(".stat-row");
