@@ -496,44 +496,29 @@ function getMyKm() {
     if (isNaN(remaining)) return null;
     return Math.max(0, total_km - remaining);
 }
-let clonedPanel = null;
+function moveBottomPanelUp(overlayHeight = 200) {
+    const panel = document.querySelector(".panel-bottom-center");
+    if (!panel) return;
 
-function cloneBottomPanel(overlayHeight = 200) {
-    const original = document.querySelector(".panel-auxiliary .adjuster-label");
-    if (!original) return;
+    // Only apply once
+    if (!panel.dataset.moved) {
+        const rect = panel.getBoundingClientRect();
 
-    if (!clonedPanel) {
-        // Create clone container
-        clonedPanel = original.cloneNode(true); // deep clone
-        clonedPanel.id = "cloned-bottom-panel";
+        panel.style.position = "fixed"; // fixed relative to viewport
+        panel.style.bottom = overlayHeight + "px"; // move above overlay
+        panel.style.left = "50%";
+        panel.style.transform = "translateX(-50%)";
+        panel.style.zIndex = 999999; // above most things
 
-        clonedPanel.style.position = "fixed";
-        clonedPanel.style.left = "50%";
-        clonedPanel.style.transform = "translateX(-50%)";
-        clonedPanel.style.bottom = overlayHeight + "px"; // above overlay
-        clonedPanel.style.zIndex = 999999;
-        clonedPanel.style.pointerEvents = "none"; // don't block clicks
-        clonedPanel.style.color = "white";
-
-        // Force everything into a single row
-        clonedPanel.style.display = "flex";
-        clonedPanel.style.flexDirection = "row";
-        clonedPanel.style.flexWrap = "nowrap";
-        clonedPanel.style.alignItems = "center";
-        clonedPanel.style.justifyContent = "center";
-
-
-        document.body.appendChild(clonedPanel);
-    } else {
-        // Update content if needed
-        clonedPanel.innerHTML = original.innerHTML;
+        panel.dataset.moved = "true";
     }
 }
 
-// Keep it synced
+// Keep checking in case the panel is re-rendered by the site
 setInterval(() => {
-    cloneBottomPanel(200);
+    moveBottomPanelUp(200); // 250px above bottom
 }, 200);
+
 
 // -------------------------
 // Init & main loop
