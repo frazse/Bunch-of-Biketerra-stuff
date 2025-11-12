@@ -243,51 +243,64 @@ function drawActiveClimbOverlay(pointsArr, climbsArr, total_km_val, myKm) {
 
     const EPS = 0.01;
     let activeClimb = climbsArr.find(c => myKm + EPS >= c.startKm && myKm - EPS <= c.endKm);
+    let climbToDraw = activeClimb || climbsArr.find(c => c.startKm > myKm);
 
+    if (!climbToDraw) {
+        ctx.fillStyle = "#fff"; ctx.font = "bold 16px Overpass, sans-serif"; ctx.textAlign = "center";
+        ctx.strokeStyle = "#000"; ctx.lineWidth = 1.5;
+        ctx.strokeText("No more climbs ahead", canvas.width/2, 20);
+        ctx.fillText("No more climbs ahead", canvas.width/2, 20);
+        return;
+    }
+
+    // --- Map points and scale ---
     const N = pointsArr.length;
     const minX = pointsArr[0].x;
-    const maxX = pointsArr[N - 1].x;
-
-    // Map X -> km, Y -> normalized elevation
-    const distKm = pointsArr.map(p => ((p.x - minX)/(maxX - minX)) * total_km_val);
-    const elevNorm = pointsArr.map(p => 1 - p.y);
-    let posSum = 0;
-    for (let i = 1; i < elevNorm.length; i++) { const d = elevNorm[i] - elevNorm[i-1]; if (d > 0) posSum += d; }
-    const scale = posSum > 0 ? total_climb / posSum : 0;
-    const elevMeters = elevNorm.map(v => v * scale);
-
-    const dense = densifyPoints(pointsArr, 5).map(p => ({ xKm: ((p.x - minX)/(maxX - minX)) * total_km_val, yMeters: (1 - p.y) * scale }));
+    const maxX = pointsArr[N-1].x;
+    const dense = densifyPoints(pointsArr, 5).map(p => ({
+        xKm: ((p.x - minX)/(maxX - minX)) * total_km_val,
+        yMeters: (1 - p.y) * total_climb
+    }));
     const M = dense.length;
 
+    const zoomStartKm = climbToDraw.startKm;
+    const zoomEndKm = climbToDraw.endKm;
+    const kmToX = km => (zoomEndKm === zoomStartKm) ? canvas.width*0.5 : canvas.width*((km - zoomStartKm)/(zoomEndKm - zoomStartKm));
+
+    let minY = Infinity, maxY = -Infinity;
+    for (let i = 0; i < M; i++) {
+        const km = dense[i].xKm;
+        if (km < zoomStartKm || km > zoomEndKm) continue;
+        if (dense[i].yMeters < minY) minY = dense[i].yMeters;
+        if (dense[i].yMeters > maxY) maxY = dense[i].yMeters;
+    }
+    if (minY === maxY) maxY = minY + 1;
+
+    const marginTop = 10, marginBottom = 5;
+    for (let i = 0; i < M-1; i++) {
+        const km0 = dense[i].xKm, km1 = dense[i+1].xKm;
+        if (km1 < zoomStartKm || km0 > zoomEndKm) continue;
+        const x0 = kmToX(Math.max(km0, zoomStartKm)), x1 = kmToX(Math.min(km1, zoomEndKm));
+        const fy0 = canvas.height - marginBottom - ((dense[i].yMeters - minY)/(maxY - minY) * (canvas.height - marginTop - marginBottom));
+        const fy1 = canvas.height - marginBottom - ((dense[i+1].yMeters - minY)/(maxY - minY) * (canvas.height - marginTop - marginBottom));
+        const dxMeters = (km1 - km0) * 1000, dyMeters = (dense[i+1].yMeters - dense[i].yMeters);
+        const grade = dxMeters !== 0 ? (dyMeters / dxMeters) * 100 : 0;
+        ctx.fillStyle = gradeToColor(grade);
+        ctx.beginPath(); ctx.moveTo(x0, canvas.height); ctx.lineTo(x0, fy0); ctx.lineTo(x1, fy1); ctx.lineTo(x1, canvas.height); ctx.closePath(); ctx.fill();
+    }
+
+    // --- Rider marker if active ---
     if (activeClimb) {
-        // --- existing active climb drawing ---
-        const zoomStartKm = activeClimb.startKm;
-        const zoomEndKm = activeClimb.endKm;
-        const kmToX = km => (zoomEndKm === zoomStartKm) ? canvas.width * 0.5 : canvas.width * ((km - zoomStartKm) / (zoomEndKm - zoomStartKm));
         const riderX = kmToX(myKm);
-
-        let minY = Infinity, maxY = -Infinity;
-        for (let i = 0; i < M; i++) { if (dense[i].yMeters < minY) minY = dense[i].yMeters; if (dense[i].yMeters > maxY) maxY = dense[i].yMeters; }
-        if (minY === maxY) maxY = minY + 1;
-
-        const marginTop = 10, marginBottom = 0;
-        for (let i = 0; i < M-1; i++) {
-            const km0 = dense[i].xKm, km1 = dense[i+1].xKm;
-            if (km1 < zoomStartKm || km0 > zoomEndKm) continue;
-            const x0 = kmToX(Math.max(km0, zoomStartKm)), x1 = kmToX(Math.min(km1, zoomEndKm));
-            const fy0 = canvas.height - marginBottom - ((dense[i].yMeters - minY)/(maxY - minY) * (canvas.height - marginTop - marginBottom));
-            const fy1 = canvas.height - marginBottom - ((dense[i+1].yMeters - minY)/(maxY - minY) * (canvas.height - marginTop - marginBottom));
-            const dxMeters = (km1 - km0) * 1000, dyMeters = (dense[i+1].yMeters - dense[i].yMeters);
-            const grade = dxMeters !== 0 ? (dyMeters / dxMeters) * 100 : 0;
-            ctx.fillStyle = gradeToColor(grade);
-            ctx.beginPath(); ctx.moveTo(x0, canvas.height); ctx.lineTo(x0, fy0); ctx.lineTo(x1, fy1); ctx.lineTo(x1, canvas.height); ctx.closePath(); ctx.fill();
-        }
-
-        // rider marker
         ctx.strokeStyle = "red"; ctx.lineWidth = 2;
         ctx.beginPath(); ctx.moveTo(riderX, 0); ctx.lineTo(riderX, canvas.height); ctx.stroke();
+    }
 
-        // climb info
+    // --- Draw text ---
+    ctx.fillStyle = "#fff"; ctx.font = "bold 16px Overpass, sans-serif"; ctx.textAlign = "center";
+    ctx.strokeStyle = "#000"; ctx.lineWidth = 1.5;
+
+    if (activeClimb) {
         const idx = climbsArr.indexOf(activeClimb);
         let correctedGain = activeClimb.gain;
         if (window.CONSOLE_CLIMBS && window.CONSOLE_CLIMBS[idx] && Number.isFinite(window.CONSOLE_CLIMBS[idx].gain)) correctedGain = window.CONSOLE_CLIMBS[idx].gain;
@@ -321,29 +334,19 @@ function drawActiveClimbOverlay(pointsArr, climbsArr, total_km_val, myKm) {
             etaStr = `${Math.floor(sec/60)}:${String(Math.floor(sec%60)).padStart(2,"0")}`;
         }
 
-        ctx.fillStyle = "#fff"; ctx.font = "bold 16px Overpass, sans-serif"; ctx.textAlign = "center";
-        ctx.strokeStyle = "#000"; ctx.lineWidth = 1.5;
         ctx.strokeText(`Climb ${idx+1}/${climbsArr.length} | ${remainingKm.toFixed(2)} km | ${remainingHeight} m | ${remainingGrade.toFixed(1)}%`, canvas.width/2, 20);
         ctx.fillText(`Climb ${idx+1}/${climbsArr.length} | ${remainingKm.toFixed(2)} km | ${remainingHeight} m | ${remainingGrade.toFixed(1)}%`, canvas.width/2, 20);
         ctx.strokeText(`ETA: ${etaStr} | Elapsed: ${elapsedStr}`, canvas.width/2, 40);
         ctx.fillText(`ETA: ${etaStr} | Elapsed: ${elapsedStr}`, canvas.width/2, 40);
 
     } else {
-        // --- no active climb: show next climb info ---
-        const nextClimb = climbsArr.find(c => c.startKm > myKm);
-        if (!nextClimb) return; // no more climbs
-
-        const distanceToNext = nextClimb.startKm - myKm;
-        const gain = nextClimb.gain;
-        const avgGrade = nextClimb.avgGrade;
-
-        ctx.fillStyle = "#fff"; ctx.font = "bold 16px Overpass, sans-serif"; ctx.textAlign = "center";
-        ctx.strokeStyle = "#000"; ctx.lineWidth = 1.5;
-        ctx.strokeText(`Next climb in ${distanceToNext.toFixed(2)} km | ${gain} m | ${avgGrade.toFixed(1)}%`, canvas.width/2, 20);
-        ctx.fillText(`Next climb in ${distanceToNext.toFixed(2)} km | ${gain} m | ${avgGrade.toFixed(1)}%`, canvas.width/2, 20);
+        const distanceToNext = climbToDraw.startKm - myKm;
+        ctx.strokeText(`Next climb in ${distanceToNext.toFixed(2)} km | ${climbToDraw.gain} m | ${climbToDraw.avgGrade.toFixed(1)}%`, canvas.width/2, 20);
+        ctx.fillText(`Next climb in ${distanceToNext.toFixed(2)} km | ${climbToDraw.gain} m | ${climbToDraw.avgGrade.toFixed(1)}%`, canvas.width/2, 20);
     }
 }
-function extendClimbsInclusive(climbs, points, minLeadInGrade = 0.1) {
+
+    function extendClimbsInclusive(climbs, points, minLeadInGrade = 0.1) {
     // minLeadInGrade = minimal slope considered as part of climb
     return climbs.map(climb => {
         let start = climb.startIdx;
