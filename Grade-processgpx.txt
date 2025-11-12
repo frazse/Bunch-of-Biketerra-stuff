@@ -243,7 +243,10 @@ function createOverlay(id, bottomPx, heightPx, zIndex) {
     overlay.style.transform = "translateX(-50%)";
     overlay.style.width = "43vw";
     overlay.style.height = heightPx + "px";
-    overlay.style.background = "rgba(0,0,0,0.25)";
+    overlay.style.background = "rgba(0,0,0,0.50)";
+    overlay.style.borderRadius = "5px"; // or whatever looks good
+    overlay.style.overflow = "hidden";   // ensures background/gradients respect the rounding
+
     overlay.style.zIndex = zIndex;
 
     const canvas = document.createElement("canvas");
