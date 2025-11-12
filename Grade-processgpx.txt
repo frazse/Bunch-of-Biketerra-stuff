@@ -157,7 +157,31 @@ function computeClimbsByUphillSegments(points, total_km, total_climb) {
     console.log("Segmented climbs found:", climbs.length, climbs);
     return climbs;
 }
+function mergeNearbyClimbs(climbs, maxGapMeters = 50) {
+    if (!climbs || climbs.length < 2) return climbs;
 
+    const merged = [];
+    let current = { ...climbs[0] };
+
+    for (let i = 1; i < climbs.length; i++) {
+        const gapKm = climbs[i].startKm - current.endKm;
+        const gapMeters = gapKm * 1000;
+
+        if (gapMeters <= maxGapMeters) {
+            // merge: extend end, add gains
+            current.endIdx = climbs[i].endIdx;
+            current.endKm = climbs[i].endKm;
+            current.gain += climbs[i].gain;
+            current.avgGrade = (current.gain / ((current.endKm - current.startKm) * 1000)) * 100;
+        } else {
+            merged.push(current);
+            current = { ...climbs[i] };
+        }
+    }
+
+    merged.push(current);
+    return merged;
+}
 // -------------------------
 // Canvas helpers & drawing (kept largely the same as you used)
 // -------------------------
@@ -465,14 +489,13 @@ function initOverlays() {
     total_climb = stats.total_climb;
     points = poly;
 
-    // 1) Compute climbs recursively
-    let rawClimbs = computeClimbsByUphillSegments(points, total_km, total_climb);
+   let rawClimbs = computeClimbsByUphillSegments(points, total_km, total_climb);
+rawClimbs = rawClimbs.filter(c => c.avgGrade >= MIN_AVG_GRADE && c.gain >= MIN_GAIN_M);
+rawClimbs = extendClimbsInclusive(rawClimbs, points, 0.1);
 
-    // 2) Optional basic filtering
-    rawClimbs = rawClimbs.filter(c => c.avgGrade >= MIN_AVG_GRADE && c.gain >= MIN_GAIN_M);
-
-    // 3) Extend climbs to include gentle slopes before/after
-climbs = extendClimbsInclusive(rawClimbs, points, 0.1);
+// MERGE nearby climbs
+rawClimbs = mergeNearbyClimbs(rawClimbs, 200); // 50 meters max gap
+climbs = rawClimbs;
 
     // 4) Export to console
     window.CONSOLE_CLIMBS = climbs;
