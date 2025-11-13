@@ -16,9 +16,16 @@
 // -------------------------
 // PARAMETERS
 // -------------------------
-const MIN_AVG_GRADE = 1.5;       // accept shallower climbs
-const MIN_GAIN_M = 50;           // accept shorter climbs
+const MIN_AVG_GRADE = 1.5;      // accept shallower climbs
+const MIN_GAIN_M = 50;          // accept shorter climbs
 const MAX_GRADE_DRAW = 15;
+
+// --- NEW CLIMB LOOK-AHEAD PARAMETERS ---
+const CLIMB_START_GRADE = 3.0;   // Grade (%) to *start* or *resume* a climb
+const CLIMB_DIP_THRESHOLD = 1.0; // If grade drops *below* this, enter a "dip"
+const MAX_DIP_DISTANCE = 200;    // Max distance (meters) to "look-ahead" in a dip
+// ---------------------------------------
+
 const ACTIVE_UPDATE_INTERVAL = 200;
 
 // Recursive-score thresholds
@@ -84,17 +91,26 @@ function getPolylinePoints() {
 // Input: points array, total_km, total_climb
 // Output: array of climbs { startIdx, endIdx, startKm, endKm, gain, avgGrade }
 
+// -------------------------
+// RECURSIVE BEST-CLIMB FINDER (FIXED)
+// -------------------------
+
+// -------------------------
+// RECURSIVE BEST-CLIMB FINDER (FINAL FIX)
+// -------------------------
+
 function computeClimbsByUphillSegments(points, total_km, total_climb) {
     if (!points || points.length < 2) return [];
 
     const N = points.length;
     const minX = points[0].x;
     const maxX = points[N - 1].x;
+    const minLeadInGrade = 1; // New internal parameter for lead-in search
 
+    // --- Original Pre-calculation Steps ---
     const distKm = points.map(p => ((p.x - minX) / (maxX - minX)) * total_km);
     const elevNorm = points.map(p => 1 - p.y);
 
-    // scale positive-only to match total climb
     let posSum = 0;
     for (let i = 1; i < N; i++) {
         const d = elevNorm[i] - elevNorm[i - 1];
@@ -104,61 +120,129 @@ function computeClimbsByUphillSegments(points, total_km, total_climb) {
     const elevMeters = elevNorm.map(v => v * scale);
 
     const climbs = [];
-    let startIdx = null;
+
+    // --- NEW STATE MACHINE IMPLEMENTATION ---
+    let state = 'SEARCHING';
+    let currentClimbStartIndex = null;
+    let lastClimbPointIndex = null;
+    let dipStartDist = null;
+
     for (let i = 1; i < N; i++) {
+        // Calculate current segment grade
         const dy = elevMeters[i] - elevMeters[i - 1];
         const dx = (distKm[i] - distKm[i - 1]) * 1000;
         const grade = dx !== 0 ? (dy / dx) * 100 : 0;
+        const currentKm = distKm[i];
 
-        // consider tiny downhill as part of climb
-        const uphillTolerance = -1; // percent grade
-        if (grade >= uphillTolerance) {
-            if (startIdx === null) startIdx = i - 1;
-        } else {
-            if (startIdx !== null) {
-                // end climb here
-                const endIdx = i - 1;
-                const gain = Math.max(0, elevMeters[endIdx] - elevMeters[startIdx]);
-                const distM = (distKm[endIdx] - distKm[startIdx]) * 1000;
-                const avgGrade = distM > 0 ? (gain / distM) * 100 : 0;
-                if (gain >= MIN_GAIN_M && avgGrade >= MIN_AVG_GRADE) {
-                    climbs.push({
-                        startIdx,
-                        endIdx,
-                        startKm: distKm[startIdx],
-                        endKm: distKm[endIdx],
-                        gain: Math.round(gain),
-                        avgGrade: Number(avgGrade.toFixed(1))
-                    });
+        switch (state) {
+            case 'SEARCHING':
+                if (grade >= CLIMB_START_GRADE) {
+                    state = 'CLIMBING';
+
+                    // --- FIX: LOOK BACK FOR GENTLE START ---
+                    let start = i - 1; // Start index is the point *before* the climbing segment
+                    while (start > 0) {
+                        // Calculate grade of the segment BEFORE the current one
+                        const prev_dy = elevMeters[start] - elevMeters[start - 1];
+                        const prev_dx = (distKm[start] - distKm[start - 1]) * 1000;
+                        const prev_grade = prev_dx !== 0 ? (prev_dy / prev_dx) * 100 : 0;
+
+                        // Stop if it's a significant downhill or a flat below minLeadInGrade
+                        if (prev_grade < -0.05 || prev_grade < minLeadInGrade) {
+                            break;
+                        }
+                        start--;
+                    }
+                    currentClimbStartIndex = start;
+                    lastClimbPointIndex = i;
+                    // --- END FIX ---
                 }
-                startIdx = null;
-            }
+                break;
+
+            case 'CLIMBING':
+                if (grade >= CLIMB_DIP_THRESHOLD) {
+                    lastClimbPointIndex = i;
+                } else {
+                    state = 'IN_DIP';
+                    dipStartDist = currentKm * 1000;
+                }
+                break;
+
+            case 'IN_DIP':
+                const distM = currentKm * 1000;
+
+                // Case A: The climb resumes!
+                if (grade >= CLIMB_START_GRADE) {
+                    state = 'CLIMBING';
+                    lastClimbPointIndex = i;
+                    dipStartDist = null;
+                }
+
+                // Case B: The dip is too long (end climb)
+                else if ((distM - dipStartDist) > MAX_DIP_DISTANCE) {
+                    const endIdx = lastClimbPointIndex;
+                    const gain = Math.max(0, elevMeters[endIdx] - elevMeters[currentClimbStartIndex]);
+                    const distMeters = (distKm[endIdx] - distKm[currentClimbStartIndex]) * 1000;
+                    const avgGrade = distMeters > 0 ? (gain / distMeters) * 100 : 0;
+
+                    if (gain >= MIN_GAIN_M && avgGrade >= MIN_AVG_GRADE) {
+                        climbs.push({
+                            startIdx: currentClimbStartIndex, endIdx,
+                            startKm: distKm[currentClimbStartIndex], endKm: distKm[endIdx],
+                            gain: Math.round(gain), avgGrade: Number(avgGrade.toFixed(1))
+                        });
+                    }
+
+                    // Reset and re-check current point
+                    state = 'SEARCHING';
+                    currentClimbStartIndex = null;
+                    lastClimbPointIndex = null;
+                    dipStartDist = null;
+
+                    // Re-check the current point (i) for a new climb start
+                    if (grade >= CLIMB_START_GRADE) {
+                        // Start index needs to be recalculated if it starts a new climb immediately
+                        state = 'CLIMBING';
+                        currentClimbStartIndex = i - 1; // Start index is the point before the segment
+                        lastClimbPointIndex = i;
+
+                        // Look back for gentle start of the new climb (same logic as above)
+                        let start = i - 1;
+                        while (start > 0) {
+                            const prev_dy = elevMeters[start] - elevMeters[start - 1];
+                            const prev_dx = (distKm[start] - distKm[start - 1]) * 1000;
+                            const prev_grade = prev_dx !== 0 ? (prev_dy / prev_dx) * 100 : 0;
+                            if (prev_grade < -0.05 || prev_grade < minLeadInGrade) {
+                                break;
+                            }
+                            start--;
+                        }
+                        currentClimbStartIndex = start;
+                    }
+                }
+                break;
         }
     }
 
-    // handle last segment
-    if (startIdx !== null) {
-        const endIdx = N - 1;
-        const gain = Math.max(0, elevMeters[endIdx] - elevMeters[startIdx]);
-        const distM = (distKm[endIdx] - distKm[startIdx]) * 1000;
-        const avgGrade = distM > 0 ? (gain / distM) * 100 : 0;
+    // --- Handle the final segment ---
+    if (currentClimbStartIndex !== null && lastClimbPointIndex !== null) {
+        const endIdx = lastClimbPointIndex;
+        const gain = Math.max(0, elevMeters[endIdx] - elevMeters[currentClimbStartIndex]);
+        const distMeters = (distKm[endIdx] - distKm[currentClimbStartIndex]) * 1000;
+        const avgGrade = distMeters > 0 ? (gain / distMeters) * 100 : 0;
+
         if (gain >= MIN_GAIN_M && avgGrade >= MIN_AVG_GRADE) {
             climbs.push({
-                startIdx,
-                endIdx,
-                startKm: distKm[startIdx],
-                endKm: distKm[endIdx],
-                gain: Math.round(gain),
-                avgGrade: Number(avgGrade.toFixed(1))
+                startIdx: currentClimbStartIndex, endIdx,
+                startKm: distKm[currentClimbStartIndex], endKm: distKm[endIdx],
+                gain: Math.round(gain), avgGrade: Number(avgGrade.toFixed(1))
             });
         }
     }
 
     console.log("Segmented climbs found:", climbs.length, climbs);
     return climbs;
-}
-
-    function mergeNearbyClimbs(climbs, maxGapMeters = 50) {
+}    function mergeNearbyClimbs(climbs, maxGapMeters = 50) {
     if (!climbs || climbs.length < 2) return climbs;
 
     const merged = [];
@@ -283,41 +367,45 @@ function drawActiveClimbOverlay(pointsArr, climbsArr, total_km_val, myKm) {
     }));
     const M = dense.length;
 
-    if (activeClimb) {
-        const zoomStartKm = activeClimb.startKm;
-        const zoomEndKm = activeClimb.endKm;
-        const kmToX = km => (zoomEndKm === zoomStartKm)
-            ? canvas.width * 0.5
-            : canvas.width * ((km - zoomStartKm) / (zoomEndKm - zoomStartKm));
-        const riderX = kmToX(myKm);
+if (activeClimb) {
+    const zoomStartKm = activeClimb.startKm;
+    const zoomEndKm = activeClimb.endKm;
+    const kmToX = km => (zoomEndKm === zoomStartKm)
+        ? canvas.width * 0.5
+        : canvas.width * ((km - zoomStartKm) / (zoomEndKm - zoomStartKm));
+    const riderX = kmToX(myKm);
 
-        let minY = Infinity, maxY = -Infinity;
-        for (let i = 0; i < M; i++) {
-            if (dense[i].yMeters < minY) minY = dense[i].yMeters;
-            if (dense[i].yMeters > maxY) maxY = dense[i].yMeters;
-        }
-        if (minY === maxY) maxY = minY + 1;
+    // --- Zoomed min/max just like preview ---
+    let minY = Infinity, maxY = -Infinity;
+    for (let i = 0; i < M; i++) {
+        const km = dense[i].xKm;
+        if (km < zoomStartKm || km > zoomEndKm) continue;
+        const y = dense[i].yMeters;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+    }
+    if (minY === maxY) maxY = minY + 1;
 
-        const marginTop = 10, marginBottom = 5;
-        for (let i = 0; i < M - 1; i++) {
-            const km0 = dense[i].xKm, km1 = dense[i + 1].xKm;
-            if (km1 < zoomStartKm || km0 > zoomEndKm) continue;
-            const x0 = kmToX(Math.max(km0, zoomStartKm));
-            const x1 = kmToX(Math.min(km1, zoomEndKm));
-            const fy0 = canvas.height - marginBottom - ((dense[i].yMeters - minY) / (maxY - minY) * (canvas.height - marginTop - marginBottom));
-            const fy1 = canvas.height - marginBottom - ((dense[i + 1].yMeters - minY) / (maxY - minY) * (canvas.height - marginTop - marginBottom));
-            const dxMeters = (km1 - km0) * 1000;
-            const dyMeters = (dense[i + 1].yMeters - dense[i].yMeters);
-            const grade = dxMeters !== 0 ? (dyMeters / dxMeters) * 100 : 0;
-            ctx.fillStyle = gradeToColor(grade);
-            ctx.beginPath();
-            ctx.moveTo(x0, canvas.height);
-            ctx.lineTo(x0, fy0);
-            ctx.lineTo(x1, fy1);
-            ctx.lineTo(x1, canvas.height);
-            ctx.closePath();
-            ctx.fill();
-        }
+    const marginTop = 10, marginBottom = 5;
+    for (let i = 0; i < M - 1; i++) {
+        const km0 = dense[i].xKm, km1 = dense[i + 1].xKm;
+        if (km1 < zoomStartKm || km0 > zoomEndKm) continue; // only inside climb
+        const x0 = kmToX(Math.max(km0, zoomStartKm));
+        const x1 = kmToX(Math.min(km1, zoomEndKm));
+        const fy0 = canvas.height - marginBottom - ((dense[i].yMeters - minY) / (maxY - minY) * (canvas.height - marginTop - marginBottom));
+        const fy1 = canvas.height - marginBottom - ((dense[i + 1].yMeters - minY) / (maxY - minY) * (canvas.height - marginTop - marginBottom));
+        const dxMeters = (km1 - km0) * 1000;
+        const dyMeters = (dense[i + 1].yMeters - dense[i].yMeters);
+        const grade = dxMeters !== 0 ? (dyMeters / dxMeters) * 100 : 0;
+        ctx.fillStyle = gradeToColor(grade);
+        ctx.beginPath();
+        ctx.moveTo(x0, canvas.height);
+        ctx.lineTo(x0, fy0);
+        ctx.lineTo(x1, fy1);
+        ctx.lineTo(x1, canvas.height);
+        ctx.closePath();
+        ctx.fill();
+    }
 
         // Rider marker
         ctx.strokeStyle = "red";
