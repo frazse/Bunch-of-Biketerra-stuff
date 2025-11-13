@@ -239,110 +239,190 @@ function drawActiveClimbOverlay(pointsArr, climbsArr, total_km_val, myKm) {
     const canvas = createOverlay("activeClimbOverlay", 110, 80, 99999);
     const ctx = canvas.getContext("2d");
     if (!pointsArr || !climbsArr.length || myKm == null) return;
-    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     const EPS = 0.01;
     let activeClimb = climbsArr.find(c => myKm + EPS >= c.startKm && myKm - EPS <= c.endKm);
-    let climbToDraw = activeClimb || climbsArr.find(c => c.startKm > myKm);
 
-    if (!climbToDraw) {
-        ctx.fillStyle = "#fff"; ctx.font = "bold 16px Overpass, sans-serif"; ctx.textAlign = "center";
-        ctx.strokeStyle = "#000"; ctx.lineWidth = 1.5;
-        ctx.strokeText("No more climbs ahead", canvas.width/2, 20);
-        ctx.fillText("No more climbs ahead", canvas.width/2, 20);
+    // Keep finished climb summary in same active overlay
+    if (!window.__climbSummary) window.__climbSummary = null;
+
+    // If a climb just finished recently, show its summary for 15 s
+    if (window.__climbSummary && performance.now() - window.__climbSummary.time < 10000) {
+        const s = window.__climbSummary;
+        const elapsedStr = `${Math.floor(s.duration/60)}:${String(Math.floor(s.duration%60)).padStart(2,"0")}`;
+
+        ctx.fillStyle = "#000a"; // dimmed background
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = "#fff";
+        ctx.textAlign = "center";
+        ctx.font = "bold 18px Overpass, sans-serif";
+        ctx.fillText(`✅ Climb ${s.index + 1} finished!`, canvas.width / 2, 30);
+
+        ctx.font = "16px Overpass, sans-serif";
+        ctx.fillText(`Height: ${s.gain} m | Avg: ${s.avgGrade.toFixed(1)}%`, canvas.width / 2, 55);
+        ctx.fillText(`Time: ${elapsedStr}`, canvas.width / 2, 75);
         return;
     }
 
-    // --- Map points and scale ---
     const N = pointsArr.length;
-    const minX = pointsArr[0].x;
-    const maxX = pointsArr[N-1].x;
+    const minX = pointsArr[0].x, maxX = pointsArr[N - 1].x;
+    const distKm = pointsArr.map(p => ((p.x - minX) / (maxX - minX)) * total_km_val);
+    const elevNorm = pointsArr.map(p => 1 - p.y);
+    let posSum = 0;
+    for (let i = 1; i < elevNorm.length; i++) {
+        const d = elevNorm[i] - elevNorm[i - 1];
+        if (d > 0) posSum += d;
+    }
+    const scale = posSum > 0 ? total_climb / posSum : 0;
     const dense = densifyPoints(pointsArr, 5).map(p => ({
-        xKm: ((p.x - minX)/(maxX - minX)) * total_km_val,
-        yMeters: (1 - p.y) * total_climb
+        xKm: ((p.x - minX) / (maxX - minX)) * total_km_val,
+        yMeters: (1 - p.y) * scale
     }));
     const M = dense.length;
 
-    const zoomStartKm = climbToDraw.startKm;
-    const zoomEndKm = climbToDraw.endKm;
-    const kmToX = km => (zoomEndKm === zoomStartKm) ? canvas.width*0.5 : canvas.width*((km - zoomStartKm)/(zoomEndKm - zoomStartKm));
-
-    let minY = Infinity, maxY = -Infinity;
-    for (let i = 0; i < M; i++) {
-        const km = dense[i].xKm;
-        if (km < zoomStartKm || km > zoomEndKm) continue;
-        if (dense[i].yMeters < minY) minY = dense[i].yMeters;
-        if (dense[i].yMeters > maxY) maxY = dense[i].yMeters;
-    }
-    if (minY === maxY) maxY = minY + 1;
-
-    const marginTop = 10, marginBottom = 5;
-    for (let i = 0; i < M-1; i++) {
-        const km0 = dense[i].xKm, km1 = dense[i+1].xKm;
-        if (km1 < zoomStartKm || km0 > zoomEndKm) continue;
-        const x0 = kmToX(Math.max(km0, zoomStartKm)), x1 = kmToX(Math.min(km1, zoomEndKm));
-        const fy0 = canvas.height - marginBottom - ((dense[i].yMeters - minY)/(maxY - minY) * (canvas.height - marginTop - marginBottom));
-        const fy1 = canvas.height - marginBottom - ((dense[i+1].yMeters - minY)/(maxY - minY) * (canvas.height - marginTop - marginBottom));
-        const dxMeters = (km1 - km0) * 1000, dyMeters = (dense[i+1].yMeters - dense[i].yMeters);
-        const grade = dxMeters !== 0 ? (dyMeters / dxMeters) * 100 : 0;
-        ctx.fillStyle = gradeToColor(grade);
-        ctx.beginPath(); ctx.moveTo(x0, canvas.height); ctx.lineTo(x0, fy0); ctx.lineTo(x1, fy1); ctx.lineTo(x1, canvas.height); ctx.closePath(); ctx.fill();
-    }
-
-    // --- Rider marker if active ---
     if (activeClimb) {
+        const zoomStartKm = activeClimb.startKm;
+        const zoomEndKm = activeClimb.endKm;
+        const kmToX = km => (zoomEndKm === zoomStartKm)
+            ? canvas.width * 0.5
+            : canvas.width * ((km - zoomStartKm) / (zoomEndKm - zoomStartKm));
         const riderX = kmToX(myKm);
-        ctx.strokeStyle = "red"; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.moveTo(riderX, 0); ctx.lineTo(riderX, canvas.height); ctx.stroke();
-    }
 
-    // --- Draw text ---
-    ctx.fillStyle = "#fff"; ctx.font = "bold 16px Overpass, sans-serif"; ctx.textAlign = "center";
-    ctx.strokeStyle = "#000"; ctx.lineWidth = 1.5;
-
-    if (activeClimb) {
-        const idx = climbsArr.indexOf(activeClimb);
-        let correctedGain = activeClimb.gain;
-        if (window.CONSOLE_CLIMBS && window.CONSOLE_CLIMBS[idx] && Number.isFinite(window.CONSOLE_CLIMBS[idx].gain)) correctedGain = window.CONSOLE_CLIMBS[idx].gain;
-        correctedGain = Number(correctedGain) || 0;
-
-        let climbedSoFar = 0;
-        for (let i = 0; i < M-1; i++) {
-            const km0 = dense[i].xKm, km1 = dense[i+1].xKm;
-            if (km1 <= activeClimb.startKm) continue;
-            if (km0 >= activeClimb.endKm) break;
-            const segStartKm = Math.max(km0, activeClimb.startKm), segEndKm = Math.min(km1, activeClimb.endKm);
-            if (segEndKm <= segStartKm) continue;
-            const segClimbedEndKm = Math.min(segEndKm, myKm);
-            if (segClimbedEndKm <= segStartKm) continue;
-            const fracWhole = (segEndKm - segStartKm) > 0 ? (segClimbedEndKm - segStartKm)/(segEndKm - segStartKm) : 0;
-            const segDy = dense[i+1].yMeters - dense[i].yMeters;
-            climbedSoFar += Math.max(0, segDy * fracWhole);
+        let minY = Infinity, maxY = -Infinity;
+        for (let i = 0; i < M; i++) {
+            if (dense[i].yMeters < minY) minY = dense[i].yMeters;
+            if (dense[i].yMeters > maxY) maxY = dense[i].yMeters;
         }
-        climbedSoFar = Math.max(0, climbedSoFar);
+        if (minY === maxY) maxY = minY + 1;
 
-        const remainingHeight = Math.round(Math.max(0, correctedGain - climbedSoFar));
+        const marginTop = 10, marginBottom = 5;
+        for (let i = 0; i < M - 1; i++) {
+            const km0 = dense[i].xKm, km1 = dense[i + 1].xKm;
+            if (km1 < zoomStartKm || km0 > zoomEndKm) continue;
+            const x0 = kmToX(Math.max(km0, zoomStartKm));
+            const x1 = kmToX(Math.min(km1, zoomEndKm));
+            const fy0 = canvas.height - marginBottom - ((dense[i].yMeters - minY) / (maxY - minY) * (canvas.height - marginTop - marginBottom));
+            const fy1 = canvas.height - marginBottom - ((dense[i + 1].yMeters - minY) / (maxY - minY) * (canvas.height - marginTop - marginBottom));
+            const dxMeters = (km1 - km0) * 1000;
+            const dyMeters = (dense[i + 1].yMeters - dense[i].yMeters);
+            const grade = dxMeters !== 0 ? (dyMeters / dxMeters) * 100 : 0;
+            ctx.fillStyle = gradeToColor(grade);
+            ctx.beginPath();
+            ctx.moveTo(x0, canvas.height);
+            ctx.lineTo(x0, fy0);
+            ctx.lineTo(x1, fy1);
+            ctx.lineTo(x1, canvas.height);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        // Rider marker
+        ctx.strokeStyle = "red";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(riderX, 0);
+        ctx.lineTo(riderX, canvas.height);
+        ctx.stroke();
+
+        // Timing + finish detection
+        const idx = climbsArr.indexOf(activeClimb);
+        if (!activeClimb.__startTime && myKm >= activeClimb.startKm)
+            activeClimb.__startTime = performance.now();
+
+        if (myKm > activeClimb.endKm + 0.005 && activeClimb.__startTime && !activeClimb.__finished) {
+            activeClimb.__finished = true;
+            const duration = (performance.now() - activeClimb.__startTime) / 1000;
+            window.__climbSummary = {
+                index: idx,
+                gain: activeClimb.gain,
+                avgGrade: activeClimb.avgGrade,
+                duration,
+                time: performance.now()
+            };
+            return;
+        }
+
+        // Display climb info
         const remainingKm = Math.max(0, activeClimb.endKm - myKm);
+        const remainingHeight = activeClimb.gain * (remainingKm / (activeClimb.endKm - activeClimb.startKm));
         const remainingGrade = remainingKm > 0 ? (remainingHeight / (remainingKm * 1000)) * 100 : 0;
+        const elapsedSec = activeClimb.__startTime ? Math.floor((performance.now() - activeClimb.__startTime) / 1000) : 0;
+        const elapsedStr = `${Math.floor(elapsedSec / 60)}:${String(elapsedSec % 60).padStart(2, "0")}`;
 
-        if (!activeClimb.__startTime && myKm >= activeClimb.startKm) activeClimb.__startTime = performance.now();
-        const elapsedSec = activeClimb.__startTime ? Math.floor((performance.now() - activeClimb.__startTime)/1000) : 0;
-        const elapsedStr = `${Math.floor(elapsedSec/60)}:${String(elapsedSec%60).padStart(2,"0")}`;
         let etaStr = "??:??";
         if (window.lastSpeedKph && window.lastSpeedKph > 1) {
-            const sec = (remainingKm*1000)/(window.lastSpeedKph/3.6);
-            etaStr = `${Math.floor(sec/60)}:${String(Math.floor(sec%60)).padStart(2,"0")}`;
+            const sec = (remainingKm * 1000) / (window.lastSpeedKph / 3.6);
+            etaStr = `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
         }
 
-        ctx.strokeText(`Climb ${idx+1}/${climbsArr.length} | ${remainingKm.toFixed(2)} km | ${remainingHeight} m | ${remainingGrade.toFixed(1)}%`, canvas.width/2, 20);
-        ctx.fillText(`Climb ${idx+1}/${climbsArr.length} | ${remainingKm.toFixed(2)} km | ${remainingHeight} m | ${remainingGrade.toFixed(1)}%`, canvas.width/2, 20);
-        ctx.strokeText(`ETA: ${etaStr} | Elapsed: ${elapsedStr}`, canvas.width/2, 40);
-        ctx.fillText(`ETA: ${etaStr} | Elapsed: ${elapsedStr}`, canvas.width/2, 40);
-
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 16px Overpass, sans-serif";
+        ctx.textAlign = "center";
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = 1.5;
+        ctx.strokeText(`Climb ${idx + 1}/${climbsArr.length} | ${remainingKm.toFixed(2)} km | ${remainingHeight.toFixed(0)} m | ${remainingGrade.toFixed(1)}%`, canvas.width / 2, 20);
+        ctx.fillText(`Climb ${idx + 1}/${climbsArr.length} | ${remainingKm.toFixed(2)} km | ${remainingHeight.toFixed(0)} m | ${remainingGrade.toFixed(1)}%`, canvas.width / 2, 20);
+        ctx.strokeText(`ETA: ${etaStr} | Elapsed: ${elapsedStr}`, canvas.width / 2, 40);
+        ctx.fillText(`ETA: ${etaStr} | Elapsed: ${elapsedStr}`, canvas.width / 2, 40);
     } else {
-        const distanceToNext = climbToDraw.startKm - myKm;
-        ctx.strokeText(`Next climb in ${distanceToNext.toFixed(2)} km | ${climbToDraw.gain} m | ${climbToDraw.avgGrade.toFixed(1)}%`, canvas.width/2, 20);
-        ctx.fillText(`Next climb in ${distanceToNext.toFixed(2)} km | ${climbToDraw.gain} m | ${climbToDraw.avgGrade.toFixed(1)}%`, canvas.width/2, 20);
+        // No active climb — preview next or say none
+        const nextClimb = climbsArr.find(c => c.startKm > myKm);
+        if (!nextClimb) {
+            ctx.fillStyle = "#fff";
+            ctx.font = "bold 18px Overpass, sans-serif";
+            ctx.textAlign = "center";
+            ctx.strokeStyle = "#000";
+            ctx.lineWidth = 1.5;
+            ctx.strokeText("No more climbs!", canvas.width / 2, 40);
+            ctx.fillText("No more climbs!", canvas.width / 2, 40);
+            return;
+        }
+
+        const distanceToNext = nextClimb.startKm - myKm;
+        const zoomStartKm = nextClimb.startKm, zoomEndKm = nextClimb.endKm;
+        const kmToX = km => (zoomEndKm === zoomStartKm)
+            ? canvas.width * 0.5
+            : canvas.width * ((km - zoomStartKm) / (zoomEndKm - zoomStartKm));
+
+        let minY = Infinity, maxY = -Infinity;
+        for (let i = 0; i < M; i++) {
+            const km = dense[i].xKm;
+            if (km < zoomStartKm || km > zoomEndKm) continue;
+            if (dense[i].yMeters < minY) minY = dense[i].yMeters;
+            if (dense[i].yMeters > maxY) maxY = dense[i].yMeters;
+        }
+        if (minY === maxY) maxY = minY + 1;
+
+        const marginTop = 10, marginBottom = 5;
+        for (let i = 0; i < M - 1; i++) {
+            const km0 = dense[i].xKm, km1 = dense[i + 1].xKm;
+            if (km1 < zoomStartKm || km0 > zoomEndKm) continue;
+            const x0 = kmToX(Math.max(km0, zoomStartKm));
+            const x1 = kmToX(Math.min(km1, zoomEndKm));
+            const fy0 = canvas.height - marginBottom - ((dense[i].yMeters - minY) / (maxY - minY) * (canvas.height - marginTop - marginBottom));
+            const fy1 = canvas.height - marginBottom - ((dense[i + 1].yMeters - minY) / (maxY - minY) * (canvas.height - marginTop - marginBottom));
+            const dxMeters = (km1 - km0) * 1000;
+            const dyMeters = (dense[i + 1].yMeters - dense[i].yMeters);
+            const grade = dxMeters !== 0 ? (dyMeters / dxMeters) * 100 : 0;
+            ctx.fillStyle = gradeToColor(grade);
+            ctx.beginPath();
+            ctx.moveTo(x0, canvas.height);
+            ctx.lineTo(x0, fy0);
+            ctx.lineTo(x1, fy1);
+            ctx.lineTo(x1, canvas.height);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 16px Overpass, sans-serif";
+        ctx.textAlign = "center";
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = 1.5;
+        ctx.strokeText(`Next climb in ${distanceToNext.toFixed(2)} km | ${nextClimb.gain} m | ${nextClimb.avgGrade.toFixed(1)}%`, canvas.width / 2, 20);
+        ctx.fillText(`Next climb in ${distanceToNext.toFixed(2)} km | ${nextClimb.gain} m | ${nextClimb.avgGrade.toFixed(1)}%`, canvas.width / 2, 20);
     }
 }
 
