@@ -247,7 +247,7 @@ function drawActiveClimbOverlay(pointsArr, climbsArr, total_km_val, myKm) {
     // Keep finished climb summary in same active overlay
     if (!window.__climbSummary) window.__climbSummary = null;
 
-    // If a climb just finished recently, show its summary for 15 s
+    // If a climb just finished recently, show its summary for 10 s
     if (window.__climbSummary && performance.now() - window.__climbSummary.time < 10000) {
         const s = window.__climbSummary;
         const elapsedStr = `${Math.floor(s.duration/60)}:${String(Math.floor(s.duration%60)).padStart(2,"0")}`;
