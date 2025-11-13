@@ -157,7 +157,8 @@ function computeClimbsByUphillSegments(points, total_km, total_climb) {
     console.log("Segmented climbs found:", climbs.length, climbs);
     return climbs;
 }
-function mergeNearbyClimbs(climbs, maxGapMeters = 50) {
+
+    function mergeNearbyClimbs(climbs, maxGapMeters = 50) {
     if (!climbs || climbs.length < 2) return climbs;
 
     const merged = [];
@@ -426,36 +427,47 @@ function drawActiveClimbOverlay(pointsArr, climbsArr, total_km_val, myKm) {
     }
 }
 
-    function extendClimbsInclusive(climbs, points, minLeadInGrade = 0.1) {
-    // minLeadInGrade = minimal slope considered as part of climb
-    return climbs.map(climb => {
+function extendClimbsInclusive(climbs, points, minLeadInGrade = 0.1) {
+    return climbs.map((climb, i) => {
         let start = climb.startIdx;
         let end = climb.endIdx;
 
-        // extend backwards: include tiny uphill / low-grade lead-in
+        // --- extend backwards: include gentle uphill or flat before climb
         while (start > 0) {
             const dy = points[start].y - points[start - 1].y;
             const dx = points[start].x - points[start - 1].x;
-            const grad = dy / dx; // slope fraction
-            if (grad < -0.01) break; // allow tiny downhill, stop if steep downhill
-            if (grad < minLeadInGrade) start--; // include low slope
+            const grad = dy / dx;
+            if (grad < -0.005) break; // stop if even tiny downhill
+            if (grad < minLeadInGrade) start--;
             else start--;
         }
 
-        // extend forwards (same as before)
-        while (end < points.length - 1) {
-            const dy = points[end + 1].y - points[end].y;
-            const dx = points[end + 1].x - points[end].x;
-            const grad = dy / dx;
-            if (grad < -0.01) break;
-            end++;
+        // --- extend forward: only if immediately leading into another climb
+        const next = climbs[i + 1];
+        if (next) {
+            const gapKm = ((points[next.startIdx].x - points[end].x) /
+                          (points[points.length - 1].x - points[0].x)) * total_km;
+            if (gapKm < 0.05) { // ≤50 m gap means same continuous hill chain
+                while (end < points.length - 1) {
+                    const dy = points[end + 1].y - points[end].y;
+                    const dx = points[end + 1].x - points[end].x;
+                    const grad = dy / dx;
+                    if (grad <= 0) break; // 🔥 stop instantly at first non-uphill
+                    end++;
+                }
+            }
+        } else {
+            // if it's the last climb, stop at the first non-uphill point
+            while (end < points.length - 1) {
+                const dy = points[end + 1].y - points[end].y;
+                const dx = points[end + 1].x - points[end].x;
+                const grad = dy / dx;
+                if (grad <= 0) break;
+                end++;
+            }
         }
 
-        return {
-            ...climb,
-            startIdx: start,
-            endIdx: end
-        };
+        return { ...climb, startIdx: start, endIdx: end };
     });
 }
 
