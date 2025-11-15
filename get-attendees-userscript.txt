@@ -1,0 +1,104 @@
+// ==UserScript==
+// @name         Live Attendees CSV (Button Download)
+// @namespace    http://tampermonkey.net/
+// @version      2.0
+// @description  Scrape attendee names dynamically and download CSV manually
+// @match        https://biketerra.com/events*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    "use strict";
+
+    const recorded = new Map(); // store unique attendees
+
+    function scrapeAttendees() {
+        const newAttendees = [];
+
+        const grid = document.querySelector(".event-grid");
+        if (!grid) return newAttendees;
+
+        const labels = grid.querySelectorAll(".event-label");
+        const values = grid.querySelectorAll(".event-value");
+
+        for (let i = 0; i < labels.length; i++) {
+            const labelText = labels[i].textContent.trim();
+            if (labelText.startsWith("Attendees")) {
+                const valueBlock = values[i];
+                const tagItems = valueBlock.querySelectorAll(".tag-item");
+                tagItems.forEach(tag => {
+                    const name = tag.textContent.trim();
+                    const link = tag.href || "";
+                    const key = link || name; // unique key
+                    if (!recorded.has(key)) {
+                        recorded.set(key, { name, link });
+                        newAttendees.push({ name, link });
+                    }
+                });
+                break;
+            }
+        }
+
+        if (newAttendees.length > 0) {
+            console.log(`New attendees detected: ${newAttendees.map(a => a.name).join(", ")}`);
+        }
+
+        return newAttendees;
+    }
+
+    function generateCSV() {
+        if (!recorded.size) {
+            alert("No attendees to download.");
+            return;
+        }
+
+        let csv = "Name,Link\n";
+        recorded.forEach(a => {
+            csv += `"${a.name}","${a.link}"\n`;
+        });
+
+        return csv;
+    }
+
+    function downloadCSV() {
+        const csv = generateCSV();
+        const blob = new Blob([csv], { type: "text/csv" });
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "attendees.csv";
+        a.click();
+
+        URL.revokeObjectURL(url);
+    }
+
+    // Initial scrape
+    scrapeAttendees();
+
+    // Observe the grid for dynamic changes
+    const grid = document.querySelector(".event-grid");
+    if (grid) {
+        const observer = new MutationObserver(() => {
+            scrapeAttendees();
+        });
+        observer.observe(grid, { childList: true, subtree: true });
+    }
+
+    // Add a floating "Download CSV" button
+    const btn = document.createElement("button");
+    btn.textContent = "Download Attendees CSV";
+    btn.style.position = "fixed";
+    btn.style.bottom = "20px";
+    btn.style.right = "20px";
+    btn.style.zIndex = "9999";
+    btn.style.padding = "10px 15px";
+    btn.style.backgroundColor = "#007bff";
+    btn.style.color = "#fff";
+    btn.style.border = "none";
+    btn.style.borderRadius = "5px";
+    btn.style.cursor = "pointer";
+    btn.addEventListener("click", downloadCSV);
+    document.body.appendChild(btn);
+
+})();
