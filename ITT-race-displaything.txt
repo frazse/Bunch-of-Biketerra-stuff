@@ -1,289 +1,267 @@
 // ==UserScript==
-// @name         Biketerra ITT Result Display thingy
-// @namespace    http://tampermonkey.net/
-// @version      3.0 // Updated version number
+// @name         Biketerra ITT Result Display Optimized v3.2
+// @namespace    http://tampermonkey.net/
+// @version      3.2
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate/*
 // @exclude      https://biketerra.com/dashboard
-// @grant        none
+// @grant        none
+// @run-at       document-idle
 // ==/UserScript==
 
 (function () {
-    'use strict';
+    'use strict';
 
-    let myName = "You";
-    let results = [];
-    let overlay;
+    let myName = "You";
+    let results = [];
+    let overlay, list, rowMap = {};
 
-    let lastSeconds = 0;
-    let running = false;
+    let lastSeconds = 0;
+    let running = false;
     let isRaceActive = false;
     let pausedTimeSeconds = 0;
     let lastUpdatePerf = performance.now();
     let lastTimerText = "00:00";
 
-    // --- New Variables for Stability ---
-    const SORT_COOLDOWN_MS = 500; // Only recalculate sort position every 500ms
+    const SORT_COOLDOWN_MS = 500; // Sorting update cooldown
     let lastSortTime = 0;
-    let sortableTime = 0; // The time value used for sorting (updated less frequently)
-    // ------------------------------------
+    let sortableTime = 0;
 
-    function medalForPos(pos) {
-        switch (pos) {
-            case 1: return "🥇";
-            case 2: return "🥈";
-            case 3: return "🥉";
-            default: return pos;
-        }
-    }
+    // --- Medal Helper ---
+    function medalForPos(pos) {
+        switch (pos) {
+            case 1: return "🥇";
+            case 2: return "🥈";
+            case 3: return "🥉";
+            default: return pos;
+        }
+    }
 
-function createOverlay(entries) {
+    // --- Overlay Skeleton ---
+// --- Overlay Skeleton with Hide Button ---
+function createOverlaySkeleton() {
     if (!overlay) {
         overlay = document.createElement('div');
         overlay.id = 'bt-results-overlay';
         document.body.appendChild(overlay);
 
         Object.assign(overlay.style, {
-            position: 'fixed',
-            top: '8px',
-            left: '8px',
-            background: 'rgba(0, 0, 0, 0.65)',
-            color: 'white',
-            padding: '8px',
-            borderRadius: '10px',
-            fontFamily: 'sans-serif',
-            fontSize: '14px',
-            zIndex: 999999,
-            boxShadow: '0 4px 10px rgba(0, 0, 0, 0.25)',
+            position: 'fixed', top: '8px', left: '8px',
+            background: 'rgba(0,0,0,0.65)', color: 'white',
+            padding: '8px', borderRadius: '10px',
+            fontFamily: 'sans-serif', fontSize: '14px',
+            zIndex: 999999, boxShadow: '0 4px 10px rgba(0,0,0,0.25)',
             backdropFilter: 'blur(4px)',
-            maxWidth: '360px',
-            maxHeight: '50%',
+            maxWidth: '360px', maxHeight: '50%',
             overflowY: 'auto',
         });
-    }
 
-    overlay.innerHTML = `
-        <div style="font-weight:700;margin-bottom:4px;">🏁 Race Results</div>
-        <div class="list"></div>
-    `;
-    const list = overlay.querySelector('.list');
+        // Header with title and hide button
+        overlay.innerHTML = `
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                <div style="font-weight:700;">🏁 Race Results</div>
+                <button id="bt-hide-btn" style="background:transparent; color:white; border:none; cursor:pointer; font-size:14px;">✖</button>
+            </div>
+            <div class="list"></div>`;
 
-let myRowIndex = -1; // keep track of my row's index
-entries
-  .filter(entry => entry.time && entry.time !== "--") // only include valid times
-  .forEach(({ pos, name, time }, i) => {
-      const div = document.createElement('div');
-      div.style.display = 'flex';
-      div.style.alignItems = 'center';
-      div.style.justifyContent = 'space-between';
-      div.style.margin = '0';
-      div.style.padding = '1px 0';
-      div.style.backgroundColor = (name === myName) ? 'rgba(255,255,255,0.1)' : 'transparent';
+        list = overlay.querySelector('.list');
 
-      const posSpan = document.createElement('span');
-      posSpan.style.width = '2em';
-      posSpan.style.textAlign = 'right';
-      posSpan.textContent = medalForPos(pos);
+        const hideBtn = overlay.querySelector('#bt-hide-btn');
+        hideBtn.addEventListener('click', () => {
+            if (list.style.display === 'none') {
+                list.style.display = 'block';
+                hideBtn.textContent = '✖';
+            } else {
+                list.style.display = 'none';
+                hideBtn.textContent = '▢';
+            }
+        });
 
-      const nameSpan = document.createElement('span');
-      nameSpan.style.flex = '1';
-      nameSpan.style.margin = '0 8px';
-      nameSpan.textContent = name;
-
-      const timeSpan = document.createElement('span');
-      timeSpan.style.fontFamily = 'monospace';
-      timeSpan.textContent = time;
-
-      div.appendChild(posSpan);
-      div.appendChild(nameSpan);
-      div.appendChild(timeSpan);
-
-      list.appendChild(div);
-
-      if(name === myName) myRowIndex = i;
-});
-
-
-    // Scroll my row into view
-    const children = Array.from(list.children);
-    if (myRowIndex >= 0 && myRowIndex < children.length) {
-        children[myRowIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (!document.getElementById('bt-results-overlay-style')) {
+            const style = document.createElement('style');
+            style.id = 'bt-results-overlay-style';
+            style.textContent = `
+            #bt-results-overlay::-webkit-scrollbar { width:8px; height:8px; }
+            #bt-results-overlay::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); border-radius:4px; }
+            #bt-results-overlay::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.3); border-radius:4px; }
+            #bt-results-overlay::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.5); }
+            #bt-results-overlay { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.3) rgba(0,0,0,0.2); }`;
+            document.head.appendChild(style);
+        }
     }
 }
-// Add this once at the top after creating the overlay
-if (!document.getElementById('bt-results-overlay-style')) {
-    const style = document.createElement('style');
-    style.id = 'bt-results-overlay-style';
-    style.textContent = `
-    /* Scrollbar for bt-results-overlay */
-    #bt-results-overlay::-webkit-scrollbar {
-        width: 8px;
-        height: 8px;
+
+    // --- Overlay Update (Change-only, throttled scroll) ---
+    function updateOverlay(entries) {
+        createOverlaySkeleton();
+
+        entries.forEach(({pos, name, time}) => {
+            let row = rowMap[name];
+            if (!row) {
+                // Create new row
+                row = document.createElement('div');
+                row.style.display = 'flex';
+                row.style.alignItems = 'center';
+                row.style.justifyContent = 'space-between';
+                row.style.margin = '0';
+                row.style.padding = '1px 0';
+                row.style.backgroundColor = (name === myName) ? 'rgba(255,255,255,0.1)' : 'transparent';
+
+                const posSpan = document.createElement('span');
+                posSpan.style.width = '2em';
+                posSpan.style.textAlign = 'right';
+                posSpan.className = 'pos';
+                row.appendChild(posSpan);
+
+                const nameSpan = document.createElement('span');
+                nameSpan.style.flex = '1';
+                nameSpan.style.margin = '0 8px';
+                nameSpan.textContent = name;
+                row.appendChild(nameSpan);
+
+                const timeSpan = document.createElement('span');
+                timeSpan.style.fontFamily = 'monospace';
+                timeSpan.className = 'time';
+                row.appendChild(timeSpan);
+
+                list.appendChild(row);
+                rowMap[name] = row;
+            }
+
+            // --- Only update if changed ---
+            const posEl = row.querySelector('.pos');
+            const timeEl = row.querySelector('.time');
+
+            const medal = medalForPos(pos);
+            if (posEl.textContent !== medal) posEl.textContent = medal;
+            if (timeEl.textContent !== time) timeEl.textContent = time;
+        });
+
+        // Scroll "You" into view at most once per second
+        if (rowMap[myName] && (!updateOverlay.lastScroll || Date.now() - updateOverlay.lastScroll > 1000)) {
+            rowMap[myName].scrollIntoView({ behavior: 'smooth', block: 'center' });
+            updateOverlay.lastScroll = Date.now();
+        }
     }
-    #bt-results-overlay::-webkit-scrollbar-track {
-        background: rgba(0,0,0,0.2);
-        border-radius: 4px;
+
+    // --- Extract Results from Table ---
+    function extractResults() {
+        const table = document.querySelector('.menu-body .grid-table.race-results');
+        if (!table) return false;
+
+        const cells = Array.from(table.children);
+        if (!cells.length) return false;
+
+        const headerCount = 3;
+        const rows = [];
+        for (let i = headerCount; i < cells.length; i += headerCount) {
+            const row = cells.slice(i, i + headerCount);
+            if (row.length < 3) continue;
+            const pos = row[0].innerText.trim();
+            const name = row[1].innerText.trim();
+            const time = row[2].innerText.trim();
+            rows.push({ pos, name, time });
+        }
+
+        results = rows;
+        updateOverlay(results);
+        return true;
     }
-    #bt-results-overlay::-webkit-scrollbar-thumb {
-        background: rgba(255,255,255,0.3);
-        border-radius: 4px;
-    }
-    #bt-results-overlay::-webkit-scrollbar-thumb:hover {
-        background: rgba(255,255,255,0.5);
-    }
 
-    /* Firefox */
-    #bt-results-overlay {
-        scrollbar-width: thin;
-        scrollbar-color: rgba(255,255,255,0.3) rgba(0,0,0,0.2);
-    }
-    `;
-    document.head.appendChild(style);
-}
-
-    function extractResults() {
-        const table = document.querySelector('.menu-body .grid-table.race-results');
-        if (!table) return false;
-
-        const cells = Array.from(table.children);
-        if (!cells.length) return false;
-
-        const headerCount = 3;
-        const rows = [];
-        for (let i = headerCount; i < cells.length; i += headerCount) {
-            const row = cells.slice(i, i + headerCount);
-            if (row.length < 3) continue;
-            const pos = row[0].innerText.trim();
-            const name = row[1].innerText.trim();
-            const time = row[2].innerText.trim();
-            rows.push({ pos, name, time });
-        }
-
-        results = rows;
-        createOverlay(results);
-        return true;
-    }
-
-    function parseTimeToSeconds(t) {
-        if (!t || t === "--") return Infinity;
-        const parts = t.split(/[:.]/);
+    // --- Time Utilities ---
+    function parseTimeToSeconds(t) {
+        if (!t || t === "--") return Infinity;
+        const parts = t.split(/[:.]/);
         let seconds = 0;
+        if (parts.length === 3) seconds = parseFloat(parts[0])*60 + parseFloat(parts[1]) + parseFloat(`0.${parts[2]}`);
+        else if (parts.length === 2) seconds = parseFloat(parts[0])*60 + parseFloat(parts[1]);
+        return seconds;
+    }
 
-        if (parts.length === 3) {
-            seconds = parseFloat(parts[0]) * 60 + parseFloat(parts[1]) + parseFloat(`0.${parts[2]}`);
-        } else if (parts.length === 2) {
-            seconds = parseFloat(parts[0]) * 60 + parseFloat(parts[1]);
-        }
-        return seconds;
-    }
-
-    function formatTime(seconds) {
+    function formatTime(seconds) {
         if (seconds === Infinity) return "--";
+        const min = Math.floor(seconds/60);
+        const sec = Math.floor(seconds % 60);
+        const ms = Math.floor((seconds - Math.floor(seconds))*1000);
+        return `${String(min).padStart(2,"0")}:${String(sec).padStart(2,"0")}.${String(ms).padStart(3,"0")}`;
+    }
 
-        const min = Math.floor(seconds / 60);
-        const sec = Math.floor(seconds % 60);
-        const ms = Math.floor((seconds - Math.floor(seconds)) * 1000);
-
-        return `${String(min).padStart(2,"0")}:${String(sec).padStart(2,"0")}.${String(ms).padStart(3,"0")}`;
-    }
-
-    function updateMyPosition() {
-        const timerEl = document.querySelector('.activity-timer-time.monospace');
-        if (!timerEl) {
-            isRaceActive = false;
-            running = false;
-            return;
-        }
+    // --- Update My Position ---
+    function updateMyPosition() {
+        const timerEl = document.querySelector('.activity-timer-time.monospace');
+        if (!timerEl) { isRaceActive=false; running=false; return; }
 
         isRaceActive = true;
         const now = performance.now();
+        const currentText = timerEl.textContent.trim();
+        const currentSeconds = parseTimeToSeconds(currentText);
 
-        const currentText = timerEl.textContent.trim();
-        const currentSeconds = parseTimeToSeconds(currentText);
-
-        // Timer Running Detection
-        if (currentText !== lastTimerText) {
-            lastTimerText = currentText;
-            lastSeconds = currentSeconds;
-            lastUpdatePerf = now;
-            running = true;
+        // Timer running detection
+        if (currentText !== lastTimerText) {
+            lastTimerText = currentText;
+            lastSeconds = currentSeconds;
+            lastUpdatePerf = now;
+            running = true;
             pausedTimeSeconds = 0;
-        } else if (running && now - lastUpdatePerf > 1000) {
-            // Timer has stopped (no change for over 1s)
+        } else if (running && now - lastUpdatePerf > 1000) {
             running = false;
             pausedTimeSeconds = lastSeconds;
-        }
-
-        let total;
-        if (running) {
-            // Real-time calculation for display
-            total = lastSeconds + (now - lastUpdatePerf) / 1000;
-        } else if (pausedTimeSeconds > 0) {
-            // Use locked-in time if paused
-            total = pausedTimeSeconds;
-        } else {
-            // Default (e.g., waiting for start)
-            total = 0;
         }
 
-        // --- Stability Logic ---
-        // Only update the time used for SORTING every 500ms (SORT_COOLDOWN_MS)
+        let total;
+        if (running) total = lastSeconds + (now - lastUpdatePerf)/1000;
+        else if (pausedTimeSeconds > 0) total = pausedTimeSeconds;
+        else total = 0;
+
+        // Update sortable time less frequently
         if (now - lastSortTime > SORT_COOLDOWN_MS || !running) {
             sortableTime = total;
             lastSortTime = now;
-        } else if (sortableTime === 0) {
-             // Ensure it's initialized immediately when the race starts
-             sortableTime = total;
-        }
-        // -----------------------
+        } else if (sortableTime === 0) sortableTime = total;
 
-        // Create the entry for "You" using the real-time for display, but sortableTime for parsing
-        const myEntry = {
-            pos: "-",
-            name: myName,
-            time: formatTime(total),
-            sortTime: formatTime(sortableTime) // Add a new property for sorting
-        };
+        // Combine results
+        const myEntry = { pos:"-", name:myName, time:formatTime(total), sortTime:formatTime(sortableTime) };
+        const combined = [...results.map(r=>({...r, sortTime:r.time})), myEntry];
 
-        const combined = [...results.map(r => ({...r, sortTime: r.time})), myEntry];
+        // Sort using sortableTime
+        combined.sort((a,b)=> parseTimeToSeconds(a.sortTime)-parseTimeToSeconds(b.sortTime));
+        combined.forEach((r,i)=> r.pos = i+1);
 
-        // Sort using the less-frequently updated time (sortableTime)
-        combined.sort((a,b)=> parseTimeToSeconds(a.sortTime) - parseTimeToSeconds(b.sortTime));
+        updateOverlay(combined);
+    }
 
-        combined.forEach((r,i)=> r.pos = i+1);
+    // --- Watch Timer ---
+    function startWatchingTimer() {
+        const timerEl = document.querySelector('.activity-timer-time.monospace');
+        if (!timerEl) return;
 
-        createOverlay(combined);
-    }
+        const observer = new MutationObserver(updateMyPosition);
+        observer.observe(timerEl, { childList:true, subtree:true, characterData:true });
 
-    function startWatchingTimer() {
-        const timerEl = document.querySelector('.activity-timer-time.monospace');
-        if (!timerEl) return;
-
-        const observer = new MutationObserver(updateMyPosition);
-        observer.observe(timerEl, { childList:true, subtree:true, characterData:true });
-
-        function tick() {
-            if (isRaceActive) {
-                // This tick handles the millisecond update and stability check
-                updateMyPosition();
+        function tick() {
+            const now = performance.now();
+            if (!tick.lastUpdate || now - tick.lastUpdate > 100) { // 10fps
+                if (isRaceActive) updateMyPosition();
+                tick.lastUpdate = now;
             }
-            requestAnimationFrame(tick);
-        }
-        requestAnimationFrame(tick);
-    }
+            requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+    }
 
-    const mainObserver = new MutationObserver(() => {
-        const table = document.querySelector('.menu-body .grid-table.race-results');
+    // --- Main Observer ---
+    const mainObserver = new MutationObserver(() => {
+        const table = document.querySelector('.menu-body .grid-table.race-results');
         const timerEl = document.querySelector('.activity-timer-time.monospace');
 
-        if (table && extractResults() && timerEl) {
+        if (table && extractResults() && timerEl) {
             mainObserver.disconnect();
-            startWatchingTimer();
-        } else if (!table && !timerEl && overlay) {
-            overlay.remove();
-            overlay = null;
+            startWatchingTimer();
+        } else if (!table && !timerEl && overlay) {
+            overlay.remove(); overlay=null; rowMap={};
         }
-    });
+    });
 
-    mainObserver.observe(document.body,{childList:true,subtree:true});
+    mainObserver.observe(document.body,{childList:true,subtree:true});
+
 })();
