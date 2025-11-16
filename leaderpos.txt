@@ -162,12 +162,12 @@
 
         startLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
         startLine.setAttribute("stroke", "white");
-        startLine.setAttribute("stroke-width", 1);
+        startLine.setAttribute("stroke-width", 0);
         svg.appendChild(startLine);
 
         endLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
         endLine.setAttribute("stroke", "white");
-        endLine.setAttribute("stroke-width", 1);
+        endLine.setAttribute("stroke-width", 0);
         svg.appendChild(endLine);
 
         myPosLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
@@ -253,7 +253,7 @@
         const overlay = createOverlay();
         const pos = getLeaderAndMyPos();
 
-        logContainer.textContent = `Leader=${pos.leaderKm.toFixed(3)} km | You=${pos.myPosKm.toFixed(3)} km | Route=${routeLength} km`;
+        logContainer.textContent = `Leader=${pos.leaderKm.toFixed(3)} km | You=${pos.myPosKm.toFixed(3)} km`;
 
         if (manualRouteLength !== null) routeLength = manualRouteLength;
         if (routeLength === 0) return;
