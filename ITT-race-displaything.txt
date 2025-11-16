@@ -92,57 +92,66 @@ function createOverlaySkeleton() {
 }
 
     // --- Overlay Update (Change-only, throttled scroll) ---
-    function updateOverlay(entries) {
-        createOverlaySkeleton();
+function updateOverlay(entries) {
+    createOverlaySkeleton();
 
-        entries.forEach(({pos, name, time}) => {
-            let row = rowMap[name];
-            if (!row) {
-                // Create new row
-                row = document.createElement('div');
-                row.style.display = 'flex';
-                row.style.alignItems = 'center';
-                row.style.justifyContent = 'space-between';
-                row.style.margin = '0';
-                row.style.padding = '1px 0';
-                row.style.backgroundColor = (name === myName) ? 'rgba(255,255,255,0.1)' : 'transparent';
+    entries.forEach(({pos, name, time}) => {
+        let row = rowMap[name];
+        if (!row) {
+            // Create new row
+            row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.alignItems = 'center';
+            row.style.justifyContent = 'space-between';
+            row.style.margin = '0';
+            row.style.padding = '1px 0';
+            row.style.backgroundColor = (name === myName) ? 'rgba(255,255,255,0.1)' : 'transparent';
 
-                const posSpan = document.createElement('span');
-                posSpan.style.width = '2em';
-                posSpan.style.textAlign = 'right';
-                posSpan.className = 'pos';
-                row.appendChild(posSpan);
+            const posSpan = document.createElement('span');
+            posSpan.style.width = '2em';
+            posSpan.style.textAlign = 'right';
+            posSpan.className = 'pos';
+            row.appendChild(posSpan);
 
-                const nameSpan = document.createElement('span');
-                nameSpan.style.flex = '1';
-                nameSpan.style.margin = '0 8px';
-                nameSpan.textContent = name;
-                row.appendChild(nameSpan);
+            const nameSpan = document.createElement('span');
+            nameSpan.style.flex = '1';
+            nameSpan.style.margin = '0 8px';
+            nameSpan.textContent = name;
+            row.appendChild(nameSpan);
 
-                const timeSpan = document.createElement('span');
-                timeSpan.style.fontFamily = 'monospace';
-                timeSpan.className = 'time';
-                row.appendChild(timeSpan);
+            const timeSpan = document.createElement('span');
+            timeSpan.style.fontFamily = 'monospace';
+            timeSpan.className = 'time';
+            row.appendChild(timeSpan);
 
-                list.appendChild(row);
-                rowMap[name] = row;
-            }
-
-            // --- Only update if changed ---
-            const posEl = row.querySelector('.pos');
-            const timeEl = row.querySelector('.time');
-
-            const medal = medalForPos(pos);
-            if (posEl.textContent !== medal) posEl.textContent = medal;
-            if (timeEl.textContent !== time) timeEl.textContent = time;
-        });
-
-        // Scroll "You" into view at most once per second
-        if (rowMap[myName] && (!updateOverlay.lastScroll || Date.now() - updateOverlay.lastScroll > 1000)) {
-            rowMap[myName].scrollIntoView({ behavior: 'smooth', block: 'center' });
-            updateOverlay.lastScroll = Date.now();
+            rowMap[name] = row;
         }
+
+        // Update content
+        const posEl = row.querySelector('.pos');
+        const timeEl = row.querySelector('.time');
+
+        const medal = medalForPos(pos);
+        if (posEl.textContent !== medal) posEl.textContent = medal;
+        if (timeEl.textContent !== time) timeEl.textContent = time;
+    });
+
+    // --- Reorder DOM based on sorted entries ---
+    entries.forEach(({name}) => {
+        const row = rowMap[name];
+        if (row && row.parentNode !== list) {
+            list.appendChild(row);
+        } else if (row) {
+            list.appendChild(row); // Moves to correct order
+        }
+    });
+
+    // Scroll "You" into view at most once per second
+    if (rowMap[myName] && (!updateOverlay.lastScroll || Date.now() - updateOverlay.lastScroll > 1000)) {
+        rowMap[myName].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        updateOverlay.lastScroll = Date.now();
     }
+}
 
     // --- Extract Results from Table ---
     function extractResults() {
