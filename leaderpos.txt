@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra LeaderOverlay
 // @namespace    http://tampermonkey.net/
-// @version      1.3
-// @description  Shows the leaders position on the elevation graph + Manual route/climb options + Toggle settings menu
+// @version      1.4
+// @description  Shows the leader's position on the elevation graph using .elev-cursor + Manual route/climb options + Toggle settings menu
 // @author       Josef
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate/*
@@ -37,7 +37,7 @@
         settingsBox = document.createElement("div");
         Object.assign(settingsBox.style, {
             position: "fixed",
-            top: "10px",        // Moved to top-left
+            top: "10px",
             left: "10px",
             padding: "10px",
             background: "rgba(0,0,0,0.8)",
@@ -45,7 +45,7 @@
             fontSize: "12px",
             borderRadius: "6px",
             zIndex: 99999,
-            display: "none"     // Hidden by default
+            display: "none"
         });
 
         settingsBox.innerHTML = `
@@ -106,7 +106,6 @@
             height: '95px',
             background: 'rgba(0,0,0,0.0)',
             zIndex: '9999',
-            border: '0px solid black',
             borderRadius: '6px',
             cursor: 'default',
             display: 'flex',
@@ -127,7 +126,6 @@
             cursor: "pointer",
             color: "rgba(255,255,255,0.5)",
             fontSize: "12px",
-            //background: "rgba(0,0,0,0.6)",
             padding: "2px 6px",
             borderRadius: "4px",
             userSelect: "none",
@@ -149,7 +147,6 @@
             color: "white",
             textAlign: "center"
         });
-
         overlay.appendChild(logContainer);
 
         // SVG Graph
@@ -174,7 +171,7 @@
         myPosLine.setAttribute("y1", 0);
         myPosLine.setAttribute("y2", height);
         myPosLine.setAttribute("stroke", "lime");
-        myPosLine.setAttribute("stroke-width", 0);
+        myPosLine.setAttribute("stroke-width", 2);
         svg.appendChild(myPosLine);
 
         leaderLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
@@ -190,100 +187,95 @@
     // ============================
     //       POSITION READER
     // ============================
-    function getLeaderAndMyPos() {
-        let leaderKm = 0;
+function getLeaderAndMyPos() {
+    let leaderPercent = null;
 
-        const ridersMain = document.querySelector(".riders-main");
-        if (ridersMain) {
-            const firstRider = ridersMain.querySelector(".rider");
-            if (firstRider) {
-                const distEl = firstRider.querySelector(".rider-distance .monospace");
+    // My position via .elev-cursor
+    let myPercent = 0;
+    const cursor = document.querySelector('.elev-cursor');
+    if (cursor) {
+        const match = cursor.style.left.match(/([\d.]+)%/);
+        if (match) myPercent = parseFloat(match[1]);
+    }
 
-                if (distEl) {
-                    const numberText = distEl.textContent.trim();
-                    let unitText = "km";
-
-                    let nextNode = distEl.nextSibling;
-                    while (nextNode) {
-                        if (nextNode.nodeType === Node.TEXT_NODE && nextNode.textContent.trim()) {
-                            unitText = nextNode.textContent.trim().toLowerCase();
-                            break;
-                        }
-                        nextNode = nextNode.nextSibling;
-                    }
-
-                    let value = parseFloat(numberText) || 0;
-                    if (unitText.includes("meter")) value /= 1000;
-
-                    if (numberText.startsWith("-")) leaderKm = -value;
-                    else if (numberText.startsWith("+")) leaderKm = value;
-                    else leaderKm = value;
-                }
-            }
-        }
-
-        // My position via "distance to go"
-        let myPosKm = 0;
+    // Auto-detect route length
+    if (autoDetect && routeLength === 0 && manualRouteLength === null) {
         const statsGrid = document.querySelector(".stats-grid");
-
         if (statsGrid) {
             const rows = statsGrid.querySelectorAll(".stat-row.svelte-1wfcwp8");
-
             if (rows.length >= 3) {
                 const valEl = rows[2].querySelector(".avg-value.svelte-1wfcwp8");
-
-                if (valEl) {
-                    myPosKm = parseFloat(valEl.textContent.trim()) || 0;
-
-                    if (autoDetect && routeLength === 0 && manualRouteLength === null) {
-                        routeLength = myPosKm;
-                        console.log("[LeaderOverlay] Auto route length detected:", routeLength);
-                    }
-                }
+                if (valEl) routeLength = parseFloat(valEl.textContent.trim()) || 0;
             }
         }
-
-        return { leaderKm, myPosKm };
     }
 
-    // ============================
-    //      UPDATE DRAWING
-    // ============================
-    function updateOverlay() {
-        const overlay = createOverlay();
-        const pos = getLeaderAndMyPos();
+    // Leader logic
+    const ridersMain = document.querySelector(".riders-main");
 
-        logContainer.textContent = `Leader=${pos.leaderKm.toFixed(3)} km | You=${pos.myPosKm.toFixed(3)} km`;
+    if (!ridersMain) {
+        // Rider list missing → you are the leader
+        leaderPercent = myPercent;
+    } else {
+        const firstRider = ridersMain.querySelector(".rider");
+        if (!firstRider) {
+            // No riders in list → you are the leader
+            leaderPercent = myPercent;
+        } else {
+            const nameEl = firstRider.querySelector(".rider-name");
+            const distEl = firstRider.querySelector(".rider-distance .monospace");
 
-        if (manualRouteLength !== null) routeLength = manualRouteLength;
-        if (routeLength === 0) return;
+            if (nameEl && (nameEl.textContent.trim().toLowerCase() === "you" || nameEl.textContent.trim().toLowerCase().includes("spectating"))) {
+                leaderPercent = myPercent;
+            } else if (distEl && routeLength > 0) {
+                let numberText = distEl.textContent.trim();
+                let unitText = "km";
 
-        const svg = overlay.querySelector("svg");
+                let nextNode = distEl.nextSibling;
+                while (nextNode) {
+                    if (nextNode.nodeType === Node.TEXT_NODE && nextNode.textContent.trim()) {
+                        unitText = nextNode.textContent.trim().toLowerCase();
+                        break;
+                    }
+                    nextNode = nextNode.nextSibling;
+                }
 
-        const width = overlay.clientWidth;
-        const height = svg.clientHeight;
+                let value = parseFloat(numberText) || 0;
+                if (unitText.includes("meter")) value /= 1000;
 
-        startLine.setAttribute("x1", 0);
-        startLine.setAttribute("x2", 0);
-        startLine.setAttribute("y2", height);
-
-        endLine.setAttribute("x1", width);
-        endLine.setAttribute("x2", width);
-        endLine.setAttribute("y2", height);
-
-        const targetMyX = ((routeLength - pos.myPosKm) / routeLength) * width;
-        const leaderAbs = pos.myPosKm - pos.leaderKm;
-        const targetLeaderX = ((routeLength - leaderAbs) / routeLength) * width;
-
-        currentMyX += (targetMyX - currentMyX) * 0.2;
-        currentLeaderX += (targetLeaderX - currentLeaderX) * 0.2;
-
-        myPosLine.setAttribute("x1", currentMyX);
-        myPosLine.setAttribute("x2", currentMyX);
-
-        leaderLine.setAttribute("x1", currentLeaderX);
-        leaderLine.setAttribute("x2", currentLeaderX);
+                leaderPercent = (value / routeLength) * 100;
+            } else {
+                // fallback
+                leaderPercent = myPercent;
+            }
+        }
     }
+
+    return { leaderPercent, myPercent };
+}
+
+function updateOverlay() {
+    const overlay = createOverlay();
+    const pos = getLeaderAndMyPos();
+
+    if (!routeLength) return; // wait until route length known
+
+    const width = overlay.clientWidth;
+
+    // Smooth animation
+    currentMyX += ((pos.myPercent / 100) * width - currentMyX) * 0.6;
+    currentLeaderX += ((pos.leaderPercent / 100) * width - currentLeaderX) * 0.6;
+
+    myPosLine.setAttribute("x1", currentMyX);
+    myPosLine.setAttribute("x2", currentMyX);
+
+    leaderLine.setAttribute("x1", currentLeaderX);
+    leaderLine.setAttribute("x2", currentLeaderX);
+
+    //logContainer.textContent = `Leader=${pos.leaderPercent.toFixed(2)}% | You=${pos.myPercent.toFixed(2)}% | Route=${routeLength} km`;
+}
+
 
     setInterval(updateOverlay, checkInterval);
+
 })();
