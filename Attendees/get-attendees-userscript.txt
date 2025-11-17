@@ -1,7 +1,10 @@
+// You need to go to the event page, let it load and then hit refresh for this script to run.
+// You can then hit the "Download Attendees CSV" button that appears in the bottom-left of the window to download a csv file with all the current attendees.
+
 // ==UserScript==
-// @name         Live Attendees CSV (Button Download)
+// @name         Live Attendees CSV (Names Only)
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  Scrape attendee names dynamically and download CSV manually
 // @match        https://biketerra.com/events*
 // @grant        none
@@ -10,11 +13,26 @@
 (function () {
     "use strict";
 
-    const recorded = new Map(); // store unique attendees
+    const recorded = new Set(); // store unique attendee names
+
+    function waitForGrid(callback) {
+        const grid = document.querySelector(".event-grid");
+        if (grid) {
+            callback(grid);
+        } else {
+            const observer = new MutationObserver((mutations, obs) => {
+                const grid = document.querySelector(".event-grid");
+                if (grid) {
+                    obs.disconnect();
+                    callback(grid);
+                }
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
+        }
+    }
 
     function scrapeAttendees() {
         const newAttendees = [];
-
         const grid = document.querySelector(".event-grid");
         if (!grid) return newAttendees;
 
@@ -28,11 +46,9 @@
                 const tagItems = valueBlock.querySelectorAll(".tag-item");
                 tagItems.forEach(tag => {
                     const name = tag.textContent.trim();
-                    const link = tag.href || "";
-                    const key = link || name; // unique key
-                    if (!recorded.has(key)) {
-                        recorded.set(key, { name, link });
-                        newAttendees.push({ name, link });
+                    if (!recorded.has(name)) {
+                        recorded.add(name);
+                        newAttendees.push(name);
                     }
                 });
                 break;
@@ -40,7 +56,7 @@
         }
 
         if (newAttendees.length > 0) {
-            console.log(`New attendees detected: ${newAttendees.map(a => a.name).join(", ")}`);
+            console.log(`New attendees detected: ${newAttendees.join(", ")}`);
         }
 
         return newAttendees;
@@ -49,12 +65,12 @@
     function generateCSV() {
         if (!recorded.size) {
             alert("No attendees to download.");
-            return;
+            return "";
         }
 
-        let csv = "Name,Link\n";
-        recorded.forEach(a => {
-            csv += `"${a.name}","${a.link}"\n`;
+        let csv = "Name\n";
+        recorded.forEach(name => {
+            csv += `"${name}"\n`;
         });
 
         return csv;
@@ -62,6 +78,8 @@
 
     function downloadCSV() {
         const csv = generateCSV();
+        if (!csv) return;
+
         const blob = new Blob([csv], { type: "text/csv" });
         const url = URL.createObjectURL(blob);
 
@@ -73,19 +91,15 @@
         URL.revokeObjectURL(url);
     }
 
-    // Initial scrape
-    scrapeAttendees();
+    // Wait for the grid to exist, then scrape and observe changes
+    waitForGrid((grid) => {
+        scrapeAttendees();
 
-    // Observe the grid for dynamic changes
-    const grid = document.querySelector(".event-grid");
-    if (grid) {
-        const observer = new MutationObserver(() => {
-            scrapeAttendees();
-        });
+        const observer = new MutationObserver(() => scrapeAttendees());
         observer.observe(grid, { childList: true, subtree: true });
-    }
+    });
 
-    // Add a floating "Download CSV" button
+    // Add the floating "Download CSV" button
     const btn = document.createElement("button");
     btn.textContent = "Download Attendees CSV";
     btn.style.position = "fixed";
