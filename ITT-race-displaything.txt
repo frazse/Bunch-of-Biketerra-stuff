@@ -182,8 +182,11 @@ function extractResults() {
 
         // --- Only include riders with valid time ---
         if (time && time !== "--") {
-            rows.push({ pos, name, time });
+        //    rows.push({ pos, name, time });
+            rows.push({ pos: rows.length + 1, name, time });
+
         }
+
     }
 
     results = rows;
@@ -267,6 +270,23 @@ function extractResults() {
         }
         requestAnimationFrame(tick);
     }
+function watchKmToGoValue() {
+    // Select the actual number element, not the label
+    const kmToGoEl = Array.from(document.querySelectorAll('.stat-row-split.stat-avg .avg-value'))
+                           .find(el => parseFloat(el.textContent) > 0 || parseFloat(el.textContent) === 0);
+
+    if (!kmToGoEl) return;
+
+    const observer = new MutationObserver(() => {
+        const km = parseFloat(kmToGoEl.textContent);
+        if (!isNaN(km) && km <= 0) {
+            extractResults(); // refresh overlay when km hits 0
+            console.log("[ITT Result] 0 KM to go hit, Refreshing Race Results")
+        }
+    });
+
+    observer.observe(kmToGoEl, { characterData: true, childList: true, subtree: true });
+}
 
     // --- Main Observer ---
     const mainObserver = new MutationObserver(() => {
