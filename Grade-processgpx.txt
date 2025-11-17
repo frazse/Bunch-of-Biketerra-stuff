@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Biketerra ClimbPro Feat. DJCONNEL
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  This adds a Climbpro like overlay to Biketerra, almost all functionality was taken from ProcessGPX by DJCONNEL ( https://github.com/djconnel/processGPX ) and everything else was done by mainly chatgpt.
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate/*
@@ -57,10 +57,49 @@ let total_climb = null;
 let points = null;
 let climbs = [];
 
+const isSpectate = location.pathname.startsWith("/spectate/");
+
 // -------------------------
 // HELPERS (DOM / polyline)
 // -------------------------
+// extractStats now supports both ride mode and spectate mode
+let spectateStatsGrabbed = false;
+
 function extractStats() {
+    // --- Spectate mode: grab only once ---
+    if (isSpectate && !spectateStatsGrabbed) {
+        try {
+            const routeMain = document.querySelector(".route-main");
+            if (!routeMain) return null;
+
+            const infoDiv = Array.from(routeMain.querySelectorAll("div"))
+                .find(d => d && /km/i.test(d.textContent) && /\//.test(d.textContent));
+            if (!infoDiv) return null;
+
+            const text = infoDiv.textContent.replace(/\s+/g, " ").trim(); // e.g. "17.5 km / 403 m"
+            const match = text.match(/([\d.,]+)\s*km\s*\/\s*([\d.,]+)\s*m/i);
+            if (!match) return null;
+
+            const distanceKm = parseFloat(match[1].replace(",", "."));
+            const climbM = parseFloat(match[2].replace(",", "."));
+
+            if (!Number.isFinite(distanceKm) || !Number.isFinite(climbM)) return null;
+
+            spectateStatsGrabbed = true;
+
+            console.log(`[ClimbPro][Spectate] Route length: ${distanceKm} km, total climb: ${climbM} m`);
+
+            return {
+                total_km: distanceKm,
+                total_climb: climbM
+            };
+        } catch (e) {
+            console.error("[ClimbPro] extractStats(spectate) error:", e);
+            return null;
+        }
+    }
+
+    // --- Regular ride mode / repeated update ---
     const statRows = document.querySelectorAll(".stat-row");
     if (statRows.length < 4) return null;
 
@@ -68,9 +107,16 @@ function extractStats() {
     const climbEl = statRows[3].querySelector(".stat-row-split.stat-avg .avg-value");
     if (!distEl || !climbEl) return null;
 
+    const distanceKm = parseFloat(distEl.textContent.trim().replace(",", ".").replace(" km", ""));
+    const climbM = parseFloat(climbEl.textContent.trim().replace(",", "."));
+
+    if (Number.isFinite(distanceKm) && Number.isFinite(climbM)) {
+        console.log(`[ClimbPro][Ride] Route length: ${distanceKm} km, total climb: ${climbM} m`);
+    }
+
     return {
-        total_km: parseFloat(distEl.textContent.trim().replace(",", ".").replace(" km", "")),
-        total_climb: parseFloat(climbEl.textContent.trim().replace(",", "."))
+        total_km: distanceKm,
+        total_climb: climbM
     };
 }
 
@@ -86,19 +132,8 @@ function getPolylinePoints() {
 
 // -------------------------
 // RECURSIVE BEST-CLIMB FINDER
+// (unchanged from your version, just included)
 // -------------------------
-// We'll implement findBestClimbsInRange using prefix sums for positive deltas.
-// Input: points array, total_km, total_climb
-// Output: array of climbs { startIdx, endIdx, startKm, endKm, gain, avgGrade }
-
-// -------------------------
-// RECURSIVE BEST-CLIMB FINDER (FIXED)
-// -------------------------
-
-// -------------------------
-// RECURSIVE BEST-CLIMB FINDER (FINAL FIX)
-// -------------------------
-
 function computeClimbsByUphillSegments(points, total_km, total_climb) {
     if (!points || points.length < 2) return [];
 
@@ -119,7 +154,7 @@ function computeClimbsByUphillSegments(points, total_km, total_climb) {
     const scale = posSum > 0 ? (total_climb / posSum) : 0;
     const elevMeters = elevNorm.map(v => v * scale);
 
-    const climbs = [];
+    const climbsLocal = [];
 
     // --- NEW STATE MACHINE IMPLEMENTATION ---
     let state = 'SEARCHING';
@@ -186,7 +221,7 @@ function computeClimbsByUphillSegments(points, total_km, total_climb) {
                     const avgGrade = distMeters > 0 ? (gain / distMeters) * 100 : 0;
 
                     if (gain >= MIN_GAIN_M && avgGrade >= MIN_AVG_GRADE) {
-                        climbs.push({
+                        climbsLocal.push({
                             startIdx: currentClimbStartIndex, endIdx,
                             startKm: distKm[currentClimbStartIndex], endKm: distKm[endIdx],
                             gain: Math.round(gain), avgGrade: Number(avgGrade.toFixed(1))
@@ -232,7 +267,7 @@ function computeClimbsByUphillSegments(points, total_km, total_climb) {
         const avgGrade = distMeters > 0 ? (gain / distMeters) * 100 : 0;
 
         if (gain >= MIN_GAIN_M && avgGrade >= MIN_AVG_GRADE) {
-            climbs.push({
+            climbsLocal.push({
                 startIdx: currentClimbStartIndex, endIdx,
                 startKm: distKm[currentClimbStartIndex], endKm: distKm[endIdx],
                 gain: Math.round(gain), avgGrade: Number(avgGrade.toFixed(1))
@@ -240,9 +275,11 @@ function computeClimbsByUphillSegments(points, total_km, total_climb) {
         }
     }
 
-    console.log("Segmented climbs found:", climbs.length, climbs);
-    return climbs;
-}    function mergeNearbyClimbs(climbs, maxGapMeters = 50) {
+    console.log("Segmented climbs found:", climbsLocal.length, climbsLocal);
+    return climbsLocal;
+}
+
+function mergeNearbyClimbs(climbs, maxGapMeters = 50) {
     if (!climbs || climbs.length < 2) return climbs;
 
     const merged = [];
@@ -367,45 +404,45 @@ function drawActiveClimbOverlay(pointsArr, climbsArr, total_km_val, myKm) {
     }));
     const M = dense.length;
 
-if (activeClimb) {
-    const zoomStartKm = activeClimb.startKm;
-    const zoomEndKm = activeClimb.endKm;
-    const kmToX = km => (zoomEndKm === zoomStartKm)
-        ? canvas.width * 0.5
-        : canvas.width * ((km - zoomStartKm) / (zoomEndKm - zoomStartKm));
-    const riderX = kmToX(myKm);
+    if (activeClimb) {
+        const zoomStartKm = activeClimb.startKm;
+        const zoomEndKm = activeClimb.endKm;
+        const kmToX = km => (zoomEndKm === zoomStartKm)
+            ? canvas.width * 0.5
+            : canvas.width * ((km - zoomStartKm) / (zoomEndKm - zoomStartKm));
+        const riderX = kmToX(myKm);
 
-    // --- Zoomed min/max just like preview ---
-    let minY = Infinity, maxY = -Infinity;
-    for (let i = 0; i < M; i++) {
-        const km = dense[i].xKm;
-        if (km < zoomStartKm || km > zoomEndKm) continue;
-        const y = dense[i].yMeters;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-    }
-    if (minY === maxY) maxY = minY + 1;
+        // --- Zoomed min/max just like preview ---
+        let minY = Infinity, maxY = -Infinity;
+        for (let i = 0; i < M; i++) {
+            const km = dense[i].xKm;
+            if (km < zoomStartKm || km > zoomEndKm) continue;
+            const y = dense[i].yMeters;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+        }
+        if (minY === maxY) maxY = minY + 1;
 
-    const marginTop = 10, marginBottom = 5;
-    for (let i = 0; i < M - 1; i++) {
-        const km0 = dense[i].xKm, km1 = dense[i + 1].xKm;
-        if (km1 < zoomStartKm || km0 > zoomEndKm) continue; // only inside climb
-        const x0 = kmToX(Math.max(km0, zoomStartKm));
-        const x1 = kmToX(Math.min(km1, zoomEndKm));
-        const fy0 = canvas.height - marginBottom - ((dense[i].yMeters - minY) / (maxY - minY) * (canvas.height - marginTop - marginBottom));
-        const fy1 = canvas.height - marginBottom - ((dense[i + 1].yMeters - minY) / (maxY - minY) * (canvas.height - marginTop - marginBottom));
-        const dxMeters = (km1 - km0) * 1000;
-        const dyMeters = (dense[i + 1].yMeters - dense[i].yMeters);
-        const grade = dxMeters !== 0 ? (dyMeters / dxMeters) * 100 : 0;
-        ctx.fillStyle = gradeToColor(grade);
-        ctx.beginPath();
-        ctx.moveTo(x0, canvas.height);
-        ctx.lineTo(x0, fy0);
-        ctx.lineTo(x1, fy1);
-        ctx.lineTo(x1, canvas.height);
-        ctx.closePath();
-        ctx.fill();
-    }
+        const marginTop = 10, marginBottom = 5;
+        for (let i = 0; i < M - 1; i++) {
+            const km0 = dense[i].xKm, km1 = dense[i + 1].xKm;
+            if (km1 < zoomStartKm || km0 > zoomEndKm) continue; // only inside climb
+            const x0 = kmToX(Math.max(km0, zoomStartKm));
+            const x1 = kmToX(Math.min(km1, zoomEndKm));
+            const fy0 = canvas.height - marginBottom - ((dense[i].yMeters - minY) / (maxY - minY) * (canvas.height - marginTop - marginBottom));
+            const fy1 = canvas.height - marginBottom - ((dense[i + 1].yMeters - minY) / (maxY - minY) * (canvas.height - marginTop - marginBottom));
+            const dxMeters = (km1 - km0) * 1000;
+            const dyMeters = (dense[i + 1].yMeters - dense[i].yMeters);
+            const grade = dxMeters !== 0 ? (dyMeters / dxMeters) * 100 : 0;
+            ctx.fillStyle = gradeToColor(grade);
+            ctx.beginPath();
+            ctx.moveTo(x0, canvas.height);
+            ctx.lineTo(x0, fy0);
+            ctx.lineTo(x1, fy1);
+            ctx.lineTo(x1, canvas.height);
+            ctx.closePath();
+            ctx.fill();
+        }
 
         // Rider marker
         ctx.strokeStyle = "red";
@@ -619,13 +656,13 @@ function initOverlays() {
     total_climb = stats.total_climb;
     points = poly;
 
-   let rawClimbs = computeClimbsByUphillSegments(points, total_km, total_climb);
-rawClimbs = rawClimbs.filter(c => c.avgGrade >= MIN_AVG_GRADE && c.gain >= MIN_GAIN_M);
-rawClimbs = extendClimbsInclusive(rawClimbs, points, 0.1);
+    let rawClimbs = computeClimbsByUphillSegments(points, total_km, total_climb);
+    rawClimbs = rawClimbs.filter(c => c.avgGrade >= MIN_AVG_GRADE && c.gain >= MIN_GAIN_M);
+    rawClimbs = extendClimbsInclusive(rawClimbs, points, 0.1);
 
-// MERGE nearby climbs
-rawClimbs = mergeNearbyClimbs(rawClimbs, 200); // 50 meters max gap
-climbs = rawClimbs;
+    // MERGE nearby climbs
+    rawClimbs = mergeNearbyClimbs(rawClimbs, 200); // 200 meters max gap
+    climbs = rawClimbs;
 
     // 4) Export to console
     window.CONSOLE_CLIMBS = climbs;
@@ -637,12 +674,12 @@ climbs = rawClimbs;
 // -------------------------
 // AUTO REFRESH ON NEW RIDE
 // -------------------------
-// -------------------------
-// AUTO REFRESH ON NEW RIDE (persistent)
-// -------------------------
 let lastClimbValue = null;
 
 function watchTotalClimbPersistent() {
+    // On spectate we don't need to watch the stats panel for a new ride
+    if (isSpectate) return;
+
     const checkInterval = 500; // ms
     setInterval(() => {
         const statRows = document.querySelectorAll(".stat-row");
@@ -666,13 +703,10 @@ function watchTotalClimbPersistent() {
 // Start persistent watch
 watchTotalClimbPersistent();
 
-
 const initTimer = setInterval(() => { if (initOverlays()) clearInterval(initTimer); }, 500);
 
 setInterval(() => {
     if (total_km && points && climbs.length) {
-        //console.log("climbs detected:", climbs.length, climbs);
-
         drawActiveClimbOverlay(points, climbs, total_km, getMyKm());
     }
 }, ACTIVE_UPDATE_INTERVAL);
