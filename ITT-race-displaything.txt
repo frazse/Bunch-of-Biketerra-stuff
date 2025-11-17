@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Biketerra ITT Result Display Optimized v3.2
+// @name         Biketerra ITT Result Display Optimized v3.3
 // @namespace    http://tampermonkey.net/
-// @version      3.2
+// @version      3.3
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate/*
 // @exclude      https://biketerra.com/dashboard
@@ -24,7 +24,9 @@
     let lastTimerText = "00:00";
 
     const SORT_COOLDOWN_MS = 500; // Sorting update cooldown
+    const UPDATE_INTERVAL = 300; // ms throttle for overlay updates
     let lastSortTime = 0;
+    let lastUpdateTime = 0;
     let sortableTime = 0;
 
     // --- Medal Helper ---
@@ -37,8 +39,8 @@
         }
     }
 
-    // --- Overlay Skeleton ---
-// --- Overlay Skeleton with Hide Button ---
+    // --- Overlay Skeleton with Hide Button ---
+// --- Overlay Skeleton with Hide and Refresh Buttons ---
 function createOverlaySkeleton() {
     if (!overlay) {
         overlay = document.createElement('div');
@@ -56,11 +58,14 @@ function createOverlaySkeleton() {
             overflowY: 'auto',
         });
 
-        // Header with title and hide button
+        // Header with title, hide and refresh buttons
         overlay.innerHTML = `
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
                 <div style="font-weight:700;">🏁 Race Results</div>
-                <button id="bt-hide-btn" style="background:transparent; color:white; border:none; cursor:pointer; font-size:14px;">✖</button>
+                <div>
+                    <button id="bt-refresh-btn" style="background:transparent; color:white; border:none; cursor:pointer; font-size:14px; margin-right:0px;">⟳</button>
+                    <button id="bt-hide-btn" style="background:transparent; color:white; border:none; cursor:pointer; font-size:14px;">🗕</button>
+                </div>
             </div>
             <div class="list"></div>`;
 
@@ -70,11 +75,16 @@ function createOverlaySkeleton() {
         hideBtn.addEventListener('click', () => {
             if (list.style.display === 'none') {
                 list.style.display = 'block';
-                hideBtn.textContent = '✖';
+                hideBtn.textContent = '🗕';
             } else {
                 list.style.display = 'none';
                 hideBtn.textContent = '▢';
             }
+        });
+
+        const refreshBtn = overlay.querySelector('#bt-refresh-btn');
+        refreshBtn.addEventListener('click', () => {
+            extractResults(); // Re-fetch the results from the table
         });
 
         if (!document.getElementById('bt-results-overlay-style')) {
@@ -91,91 +101,95 @@ function createOverlaySkeleton() {
     }
 }
 
-    // --- Overlay Update (Change-only, throttled scroll) ---
-function updateOverlay(entries) {
-    createOverlaySkeleton();
+    // --- Overlay Update ---
+    function updateOverlay(entries) {
+        createOverlaySkeleton();
 
-    entries.forEach(({pos, name, time}) => {
-        let row = rowMap[name];
-        if (!row) {
-            // Create new row
-            row = document.createElement('div');
-            row.style.display = 'flex';
-            row.style.alignItems = 'center';
-            row.style.justifyContent = 'space-between';
-            row.style.margin = '0';
-            row.style.padding = '1px 0';
-            row.style.backgroundColor = (name === myName) ? 'rgba(255,255,255,0.1)' : 'transparent';
+        let needReorder = false;
 
-            const posSpan = document.createElement('span');
-            posSpan.style.width = '2em';
-            posSpan.style.textAlign = 'right';
-            posSpan.className = 'pos';
-            row.appendChild(posSpan);
+        entries.forEach(({pos, name, time}) => {
+            let row = rowMap[name];
+            if (!row) {
+                row = document.createElement('div');
+                row.style.display = 'flex';
+                row.style.alignItems = 'center';
+                row.style.justifyContent = 'space-between';
+                row.style.margin = '0';
+                row.style.padding = '1px 0';
+                row.style.backgroundColor = (name === myName) ? 'rgba(255,255,255,0.1)' : 'transparent';
 
-            const nameSpan = document.createElement('span');
-            nameSpan.style.flex = '1';
-            nameSpan.style.margin = '0 8px';
-            nameSpan.textContent = name;
-            row.appendChild(nameSpan);
+                const posSpan = document.createElement('span');
+                posSpan.style.width = '2em';
+                posSpan.style.textAlign = 'right';
+                posSpan.className = 'pos';
+                row.appendChild(posSpan);
 
-            const timeSpan = document.createElement('span');
-            timeSpan.style.fontFamily = 'monospace';
-            timeSpan.className = 'time';
-            row.appendChild(timeSpan);
+                const nameSpan = document.createElement('span');
+                nameSpan.style.flex = '1';
+                nameSpan.style.margin = '0 8px';
+                nameSpan.textContent = name;
+                row.appendChild(nameSpan);
 
-            rowMap[name] = row;
+                const timeSpan = document.createElement('span');
+                timeSpan.style.fontFamily = 'monospace';
+                timeSpan.className = 'time';
+                row.appendChild(timeSpan);
+
+                rowMap[name] = row;
+                needReorder = true;
+            }
+
+            const posEl = row.querySelector('.pos');
+            const timeEl = row.querySelector('.time');
+
+            const medal = medalForPos(pos);
+            if (posEl.textContent !== medal) posEl.textContent = medal;
+            if (timeEl.textContent !== time) timeEl.textContent = time;
+        });
+
+        const currentOrder = entries.map(e => e.name).join();
+        if (needReorder || updateOverlay.lastOrder !== currentOrder) {
+            const fragment = document.createDocumentFragment();
+            entries.forEach(({name}) => fragment.appendChild(rowMap[name]));
+            list.appendChild(fragment);
+            updateOverlay.lastOrder = currentOrder;
         }
 
-        // Update content
-        const posEl = row.querySelector('.pos');
-        const timeEl = row.querySelector('.time');
-
-        const medal = medalForPos(pos);
-        if (posEl.textContent !== medal) posEl.textContent = medal;
-        if (timeEl.textContent !== time) timeEl.textContent = time;
-    });
-
-    // --- Reorder DOM based on sorted entries ---
-    entries.forEach(({name}) => {
-        const row = rowMap[name];
-        if (row && row.parentNode !== list) {
-            list.appendChild(row);
-        } else if (row) {
-            list.appendChild(row); // Moves to correct order
+        // Scroll "You" into view at most once per second
+        if (rowMap[myName] && (!updateOverlay.lastScroll || Date.now() - updateOverlay.lastScroll > 1000)) {
+            rowMap[myName].scrollIntoView({ behavior: 'smooth', block: 'center' });
+            updateOverlay.lastScroll = Date.now();
         }
-    });
-
-    // Scroll "You" into view at most once per second
-    if (rowMap[myName] && (!updateOverlay.lastScroll || Date.now() - updateOverlay.lastScroll > 1000)) {
-        rowMap[myName].scrollIntoView({ behavior: 'smooth', block: 'center' });
-        updateOverlay.lastScroll = Date.now();
     }
-}
 
-    // --- Extract Results from Table ---
-    function extractResults() {
-        const table = document.querySelector('.menu-body .grid-table.race-results');
-        if (!table) return false;
+    // --- Extract Results ---
+function extractResults() {
+    const table = document.querySelector('.menu-body .grid-table.race-results');
+    if (!table) return false;
 
-        const cells = Array.from(table.children);
-        if (!cells.length) return false;
+    const cells = Array.from(table.children);
+    if (!cells.length) return false;
 
-        const headerCount = 3;
-        const rows = [];
-        for (let i = headerCount; i < cells.length; i += headerCount) {
-            const row = cells.slice(i, i + headerCount);
-            if (row.length < 3) continue;
-            const pos = row[0].innerText.trim();
-            const name = row[1].innerText.trim();
-            const time = row[2].innerText.trim();
+    const headerCount = 3;
+    const rows = [];
+    for (let i = headerCount; i < cells.length; i += headerCount) {
+        const row = cells.slice(i, i + headerCount);
+        if (row.length < 3) continue;
+
+        const pos = row[0].innerText.trim();
+        const name = row[1].innerText.trim();
+        const time = row[2].innerText.trim();
+
+        // --- Only include riders with valid time ---
+        if (time && time !== "--") {
             rows.push({ pos, name, time });
         }
-
-        results = rows;
-        updateOverlay(results);
-        return true;
     }
+
+    results = rows;
+    updateOverlay(results);
+    return true;
+}
 
     // --- Time Utilities ---
     function parseTimeToSeconds(t) {
@@ -197,15 +211,17 @@ function updateOverlay(entries) {
 
     // --- Update My Position ---
     function updateMyPosition() {
+        const now = performance.now();
+        if (now - lastUpdateTime < UPDATE_INTERVAL) return; // throttle
+        lastUpdateTime = now;
+
         const timerEl = document.querySelector('.activity-timer-time.monospace');
         if (!timerEl) { isRaceActive=false; running=false; return; }
 
         isRaceActive = true;
-        const now = performance.now();
         const currentText = timerEl.textContent.trim();
         const currentSeconds = parseTimeToSeconds(currentText);
 
-        // Timer running detection
         if (currentText !== lastTimerText) {
             lastTimerText = currentText;
             lastSeconds = currentSeconds;
@@ -217,24 +233,18 @@ function updateOverlay(entries) {
             pausedTimeSeconds = lastSeconds;
         }
 
-        let total;
-        if (running) total = lastSeconds + (now - lastUpdatePerf)/1000;
-        else if (pausedTimeSeconds > 0) total = pausedTimeSeconds;
-        else total = 0;
+        let total = running ? lastSeconds + (now - lastUpdatePerf)/1000 : pausedTimeSeconds || 0;
 
-        // Update sortable time less frequently
         if (now - lastSortTime > SORT_COOLDOWN_MS || !running) {
             sortableTime = total;
             lastSortTime = now;
-        } else if (sortableTime === 0) sortableTime = total;
+        }
 
-        // Combine results
         const myEntry = { pos:"-", name:myName, time:formatTime(total), sortTime:formatTime(sortableTime) };
         const combined = [...results.map(r=>({...r, sortTime:r.time})), myEntry];
 
-        // Sort using sortableTime
-        combined.sort((a,b)=> parseTimeToSeconds(a.sortTime)-parseTimeToSeconds(b.sortTime));
-        combined.forEach((r,i)=> r.pos = i+1);
+        combined.sort((a,b) => parseTimeToSeconds(a.sortTime) - parseTimeToSeconds(b.sortTime));
+        combined.forEach((r,i) => r.pos = i+1);
 
         updateOverlay(combined);
     }
@@ -249,7 +259,7 @@ function updateOverlay(entries) {
 
         function tick() {
             const now = performance.now();
-            if (!tick.lastUpdate || now - tick.lastUpdate > 100) { // 10fps
+            if (!tick.lastUpdate || now - tick.lastUpdate > 100) {
                 if (isRaceActive) updateMyPosition();
                 tick.lastUpdate = now;
             }
@@ -272,5 +282,4 @@ function updateOverlay(entries) {
     });
 
     mainObserver.observe(document.body,{childList:true,subtree:true});
-
 })();
