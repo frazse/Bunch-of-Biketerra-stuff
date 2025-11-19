@@ -4,7 +4,7 @@
 // @namespace     http://tampermonkey.net/
 // @version       1.2.1
 // @description   Adds a 3D Babylon.js elevation route to Biketerra ride & spectate pages. Uses pre-loaded JSON or intercepts fetch.
-// @author        Josef (patched)
+// @author        Josef/chatgpt/gemini
 // @match         https://biketerra.com/ride*
 // @match         https://biketerra.com/spectate*
 // @exclude       https://biketerra.com/dashboard
@@ -261,6 +261,7 @@
         camera.minZ = 0.1;
         camera.lowerRadiusLimit = 0.5;
         camera.upperRadiusLimit = radius * 5;
+        camera.wheelDeltaPercentage = 0.05;
 
         new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0,1,0), scene);
 
