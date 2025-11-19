@@ -1,22 +1,57 @@
 // const yExag allows you to set scaling on Y aka height.
-
 // ==UserScript==
-// @name         Biketerra 3D Route Viewer
-// @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  Adds a 3D Babylon.js elevation route to Biketerra ride pages (distance-correct marker + arrow)
-// @author       Josef/Chatgpt
-// @match        https://biketerra.com/ride*
-// @match        https://biketerra.com/spectate*
-// @exclude      https://biketerra.com/dashboard
-// @icon         https://www.google.com/s2/favicons?sz=64&domain=biketerra.com
-// @grant        none
+// @name          Biketerra 3D Route Viewer
+// @namespace     http://tampermonkey.net/
+// @version       1.2.1
+// @description   Adds a 3D Babylon.js elevation route to Biketerra ride & spectate pages. Uses pre-loaded JSON or intercepts fetch.
+// @author        Josef (patched)
+// @match         https://biketerra.com/ride*
+// @match         https://biketerra.com/spectate*
+// @exclude       https://biketerra.com/dashboard
+// @icon          https://www.google.com/s2/favicons?sz=64&domain=biketerra.com
+// @grant         none
 // ==/UserScript==
 
 (function() {
     'use strict';
 
+    // Global variable to hold the intercepted JSON data
+    let interceptedRouteJson = null;
+
+    // --- Interception Logic (Must run immediately) ---
+    const originalFetch = window.fetch;
+    window.fetch = async function(...args) {
+        const [resource, options] = args;
+
+        // Check if the request is for the route JSON
+        if (typeof resource === 'string' && resource.includes('/__data.json')) {
+            // Perform the original fetch
+            const response = await originalFetch(resource, options);
+
+            // Clone the response so we can read the body twice (once for the site, once for us)
+            const clonedResponse = response.clone();
+
+            // Read and store the JSON data
+            try {
+                const data = await clonedResponse.json();
+                interceptedRouteJson = data;
+                console.log('[3D Viewer] Intercepted route JSON from fetch request.');
+            } catch (e) {
+                console.error('[3D Viewer] Error parsing intercepted JSON:', e);
+            }
+
+            // Return the original response to the caller
+            return response;
+        }
+
+        // Not the JSON we're looking for, just call original fetch
+        return originalFetch.apply(this, args);
+    };
+    // -------------------------------------------------
+
+
     function waitFor(selector, timeout = 10000) {
+        // ... (waitFor function remains the same)
         return new Promise((resolve, reject) => {
             const t = setTimeout(() => reject("Timeout waiting for " + selector), timeout);
             const check = () => {
@@ -50,58 +85,111 @@
         }
         const BABYLON = window.BABYLON;
 
-// ===== Fetch route JSON dynamically based on page type =====
-let url;
-const params = new URLSearchParams(window.location.search);
-
-if (window.location.pathname.startsWith("/spectate/")) {
-    // example: /spectate/xxxx → fetch /spectate/xxxx/__data.json
-    const spectateId = window.location.pathname.split("/")[2];
-    url = `https://biketerra.com/spectate/${spectateId}/__data.json`;
-} else if (window.location.pathname.startsWith("/ride")) {
-    // example: /ride?event=xxxx → fetch /ride/__data.json?event=xxxx
-    const eventId = params.get("event");
-    if (eventId) {
-        url = `https://biketerra.com/ride/__data.json?event=${eventId}`;
-    } else {
-        // fallback: /ride?route=xxxx → fetch /ride/__data.json?route=xxxx
-        const routeId = params.get("route");
-        if (!routeId) return console.error("No route ID found");
-        url = `https://biketerra.com/ride/__data.json?route=${routeId}`;
-    }
-} else {
-    return console.error("Unknown page type");
-}
-
-// fetch JSON dynamically
-const resp = await fetch(url);
-const j = await resp.json();
-
-// ===== Find route coordinates dynamically =====
-function findRoutes(obj, routes = []) {
-    if (!obj) return routes;
-    if (Array.isArray(obj)) {
-        if (obj.length > 0 && Array.isArray(obj[0]) && typeof obj[0][0] === "number") {
-            routes.push(obj);
-        } else obj.forEach(el => findRoutes(el, routes));
-    } else if (typeof obj === "string") {
-        try { findRoutes(JSON.parse(obj), routes); } catch {}
-    } else if (typeof obj === "object") {
-        Object.values(obj).forEach(v => findRoutes(v, routes));
-    }
-    return routes;
-}
-
-const routes = findRoutes(j);
-if (!routes.length) return console.warn("No route found");
-const raw = routes[0]; // expected [[lat, lon, ele, dist?], ...]
+        // ... (Determine JSON URL part remains the same, though less critical now) ...
+        let url;
+        const params = new URLSearchParams(window.location.search);
+        // ... (url determination logic) ...
+        if (window.location.pathname.startsWith("/spectate/")) {
+            const spectateId = window.location.pathname.split("/")[2];
+            url = `https://biketerra.com/spectate/${spectateId}/__data.json`;
+        } else if (window.location.pathname.startsWith("/ride")) {
+            const eventId = params.get("event");
+            if (eventId) {
+                url = `https://biketerra.com/ride/__data.json?event=${eventId}`;
+            } else {
+                const routeId = params.get("route");
+                if (!routeId) return console.error("No route ID found");
+                url = `https://biketerra.com/ride/__data.json?route=${routeId}`;
+            }
+        } else {
+            return console.error("Unknown page type for 3D Viewer");
+        }
 
 
-        // ===== Convert lat/lon/ele → meters (x east, z north, y elev) =====
-        const lat0 = raw[0][0] * Math.PI/180;
-        const lon0 = raw[0][1] * Math.PI/180;
+        // ===== Use INTERCEPTED JSON first, then preloaded Remix, then fetch =====
+        let j = null;
+
+        // 1. Try Intercepted Data
+        if (interceptedRouteJson) {
+            j = interceptedRouteJson;
+            console.log("[3D Viewer] Using intercepted JSON from fetch.");
+        }
+
+        // 2. Try preloaded JSON from Remix loader (existing logic)
+        if (!j) {
+            const remix = window.__remixContext;
+            if (remix?.state?.loaderData) {
+                const ld = remix.state.loaderData;
+                for (const key in ld) {
+                    const v = ld[key];
+                    // The extensive route finding logic goes here (same as original script)
+                    if (v?.data?.route)      { j = v.data.route;      break; }
+                    if (v?.data?.routeData)  { j = v.data.routeData;  break; }
+                    if (v?.route)            { j = v.route;           break; }
+                    if (v?.routeData)        { j = v.routeData;       break; }
+                    if (Array.isArray(v) &&
+                        v.length > 0 &&
+                        Array.isArray(v[0]) &&
+                        typeof v[0][0] === "number") {
+                        j = v;
+                        break;
+                    }
+                    if (v?.data &&
+                        Array.isArray(v.data) &&
+                        v.data.length > 0 &&
+                        Array.isArray(v.data[0]) &&
+                        typeof v.data[0][0] === "number") {
+                        j = v.data;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (j) {
+            // Already found JSON from interception or Remix
+            console.log("[3D Viewer] Route JSON successfully acquired.");
+        } else {
+            // 3. Fallback: Perform the fetch (Original script's fallback)
+            console.warn("[3D Viewer] Fallback to new fetch for route JSON:", url);
+            const resp = await fetch(url);
+            j = await resp.json();
+        }
+
+        if (!j) {
+            return console.error("Unable to obtain route JSON for 3D Viewer");
+        }
+
+        // ... (The rest of start3DViewer() remains the same, using 'j') ...
+
+        // ===== Find route coordinates =====
+        function findRoutes(obj, routes = []) {
+            // ... (findRoutes function remains the same) ...
+            if (!obj) return routes;
+            if (Array.isArray(obj)) {
+                if (obj.length > 0 && Array.isArray(obj[0]) && typeof obj[0][0] === "number") {
+                    routes.push(obj);
+                } else obj.forEach(el => findRoutes(el, routes));
+            } else if (typeof obj === "string") {
+                try { findRoutes(JSON.parse(obj), routes); } catch {}
+            } else if (typeof obj === "object") {
+                Object.values(obj).forEach(v => findRoutes(v, routes));
+            }
+            return routes;
+        }
+
+        const routes = findRoutes(j);
+        if (!routes.length) {
+            return console.warn("3D Viewer: No route array found in JSON");
+        }
+        const raw = routes[0];
+
+        // ... (The rest of the script for conversion and scene building remains unchanged) ...
+        const lat0 = raw[0][0] * Math.PI / 180;
+        const lon0 = raw[0][1] * Math.PI / 180;
         const R = 6371000;
 
+        // ... (Continue with the rest of the original script) ...
         const xVals = raw.map(p => ((p[1]*Math.PI/180 - lon0) * R * Math.cos(lat0))); // east (m)
         const zVals = raw.map(p => ((p[0]*Math.PI/180 - lat0) * R));                  // north (m)
         const yVals = raw.map(p => p[2]);                                              // elevation (m)
