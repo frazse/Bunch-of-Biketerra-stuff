@@ -1,0 +1,334 @@
+// const yExag allows you to set scaling on Y aka height.
+
+// ==UserScript==
+// @name         Biketerra 3D Route Viewer
+// @namespace    http://tampermonkey.net/
+// @version      1.1
+// @description  Adds a 3D Babylon.js elevation route to Biketerra ride pages (distance-correct marker + arrow)
+// @author       Josef/Chatgpt
+// @match        https://biketerra.com/ride*
+// @match        https://biketerra.com/spectate*
+// @exclude      https://biketerra.com/dashboard
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=biketerra.com
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    function waitFor(selector, timeout = 10000) {
+        return new Promise((resolve, reject) => {
+            const t = setTimeout(() => reject("Timeout waiting for " + selector), timeout);
+            const check = () => {
+                const el = document.querySelector(selector);
+                if (el) {
+                    clearTimeout(t);
+                    resolve(el);
+                } else {
+                    requestAnimationFrame(check);
+                }
+            };
+            check();
+        });
+    }
+
+    waitFor(".elev-cursor").then(() => {
+        console.log("[3D Viewer] Page ready — launching viewer…");
+        start3DViewer();
+    }).catch(err => console.error(err));
+
+    async function start3DViewer() {
+        // Load Babylon.js if not present
+        if (typeof window.BABYLON === 'undefined') {
+            await new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                script.src = 'https://cdn.babylonjs.com/babylon.js';
+                script.onload = resolve;
+                script.onerror = reject;
+                document.head.appendChild(script);
+            });
+        }
+        const BABYLON = window.BABYLON;
+
+// ===== Fetch route JSON dynamically based on page type =====
+let url;
+const params = new URLSearchParams(window.location.search);
+
+if (window.location.pathname.startsWith("/spectate/")) {
+    // example: /spectate/xxxx → fetch /spectate/xxxx/__data.json
+    const spectateId = window.location.pathname.split("/")[2];
+    url = `https://biketerra.com/spectate/${spectateId}/__data.json`;
+} else if (window.location.pathname.startsWith("/ride")) {
+    // example: /ride?event=xxxx → fetch /ride/__data.json?event=xxxx
+    const eventId = params.get("event");
+    if (eventId) {
+        url = `https://biketerra.com/ride/__data.json?event=${eventId}`;
+    } else {
+        // fallback: /ride?route=xxxx → fetch /ride/__data.json?route=xxxx
+        const routeId = params.get("route");
+        if (!routeId) return console.error("No route ID found");
+        url = `https://biketerra.com/ride/__data.json?route=${routeId}`;
+    }
+} else {
+    return console.error("Unknown page type");
+}
+
+// fetch JSON dynamically
+const resp = await fetch(url);
+const j = await resp.json();
+
+// ===== Find route coordinates dynamically =====
+function findRoutes(obj, routes = []) {
+    if (!obj) return routes;
+    if (Array.isArray(obj)) {
+        if (obj.length > 0 && Array.isArray(obj[0]) && typeof obj[0][0] === "number") {
+            routes.push(obj);
+        } else obj.forEach(el => findRoutes(el, routes));
+    } else if (typeof obj === "string") {
+        try { findRoutes(JSON.parse(obj), routes); } catch {}
+    } else if (typeof obj === "object") {
+        Object.values(obj).forEach(v => findRoutes(v, routes));
+    }
+    return routes;
+}
+
+const routes = findRoutes(j);
+if (!routes.length) return console.warn("No route found");
+const raw = routes[0]; // expected [[lat, lon, ele, dist?], ...]
+
+
+        // ===== Convert lat/lon/ele → meters (x east, z north, y elev) =====
+        const lat0 = raw[0][0] * Math.PI/180;
+        const lon0 = raw[0][1] * Math.PI/180;
+        const R = 6371000;
+
+        const xVals = raw.map(p => ((p[1]*Math.PI/180 - lon0) * R * Math.cos(lat0))); // east (m)
+        const zVals = raw.map(p => ((p[0]*Math.PI/180 - lat0) * R));                  // north (m)
+        const yVals = raw.map(p => p[2]);                                              // elevation (m)
+
+        // ===== Normalization for scene coordinates (keep meter ratios, but scale to fit) =====
+        const xMin = Math.min(...xVals), xMax = Math.max(...xVals);
+        const zMin = Math.min(...zVals), zMax = Math.max(...zVals);
+        const yMin = Math.min(...yVals);
+
+        const xRange = xMax - xMin, zRange = zMax - zMin;
+        const maxXZ = Math.max(xRange, zRange) || 1;
+
+        const yExag = 0.005; // vertical exaggeration factor (adjust)
+
+        const points = raw.map((p,i) => new BABYLON.Vector3(
+            (xVals[i] - (xMin + xMax)/2) / maxXZ * 20,
+            (yVals[i] - yMin) * yExag,
+            (zVals[i] - (zMin + zMax)/2) / maxXZ * 20
+        ));
+
+        // ===== CUMULATIVE DISTANCES (meters) - horizontal distance in meters from xVals,zVals =====
+        const cum = new Array(xVals.length).fill(0);
+        for (let i = 1; i < xVals.length; i++) {
+            const dx = xVals[i] - xVals[i-1];
+            const dz = zVals[i] - zVals[i-1];
+            cum[i] = cum[i-1] + Math.hypot(dx, dz);
+        }
+        const totalDist = cum[cum.length - 1] || 1;
+
+        // binary search helper to find index i such that cum[i] <= d <= cum[i+1]
+        function findSegmentIndexByDist(d) {
+            if (d <= 0) return 0;
+            if (d >= totalDist) return cum.length - 2;
+            let lo = 0, hi = cum.length - 1;
+            while (lo <= hi) {
+                const mid = (lo + hi) >> 1;
+                if (cum[mid] <= d && d <= cum[mid+1]) return mid;
+                if (cum[mid] < d) lo = mid + 1;
+                else hi = mid - 1;
+            }
+            return Math.max(0, Math.min(cum.length - 2, lo - 1));
+        }
+
+        // ===== Canvas + Engine + Scene =====
+        const canvas = document.createElement("canvas");
+        canvas.width = 600;
+        canvas.height = 350;
+        canvas.style.position = "fixed";
+        canvas.style.top = "8px";
+        canvas.style.left = "8px";
+        canvas.style.zIndex = "1";
+        canvas.style.background = "transparent";
+        canvas.style.borderRadius = "8px";
+        // optional: make it click-through -> canvas.style.pointerEvents = "none";
+        document.body.appendChild(canvas);
+
+        const engine = new BABYLON.Engine(canvas, true, {
+            preserveDrawingBuffer: true,
+            stencil: true,
+            premultipliedAlpha: false
+        });
+
+        const scene = new BABYLON.Scene(engine);
+        scene.clearColor = new BABYLON.Color4(0, 0, 0, 0.5); // background with partial alpha
+
+        const radius = Math.max(...points.map(p => p.length())) * 2;
+        const camera = new BABYLON.ArcRotateCamera("cam", Math.PI/2, Math.PI/3, radius, BABYLON.Vector3.Zero(), scene);
+        camera.attachControl(canvas, true);
+        camera.minZ = 0.1;
+        camera.lowerRadiusLimit = 1.5;
+        camera.upperRadiusLimit = radius * 5;
+
+        new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0,1,0), scene);
+
+        // ===== Grade colors (kept for fill logic if you want) =====
+        const GRADE_COLORS = [
+            { grade: 0, color: "#0008" },
+            { grade: 1, color: "#FF6262" },
+            { grade: 4, color: "#DC5666" },
+            { grade: 8, color: "#B14674" },
+            { grade: 11, color: "#7F347C" },
+           // { grade: 14, color: "#572667" }
+        ];
+        function hexToC4(hex) {
+            const n = parseInt(hex.slice(1), 16);
+            return new BABYLON.Color4(
+                ((n >> 16) & 255) / 255,
+                ((n >> 8) & 255) / 255,
+                (n & 255) / 255,
+                1
+            );
+        }
+        function getGradeColor(g) {
+            for (let i = GRADE_COLORS.length - 1; i >= 0; i--) {
+                if (g >= GRADE_COLORS[i].grade) return hexToC4(GRADE_COLORS[i].color);
+            }
+            return hexToC4(GRADE_COLORS[0].color);
+        }
+
+        // ===== Simple flat fill (keeps previous approach) =====
+        // Build a colored triangle list per-segment so fill matches segment color (no vertical gradient)
+        const bottomY = Math.min(...points.map(p => p.y));
+        const positions = [];
+        const colorsArray = [];
+        const indices = [];
+        let baseIndex = 0;
+        // compute per-segment grade colors (based on distance and elevation)
+        const grades = [];
+        for (let i = 0; i < xVals.length - 1; i++) {
+            const dy = yVals[i+1] - yVals[i];
+            const dxz = Math.hypot(xVals[i+1] - xVals[i], zVals[i+1] - zVals[i]);
+            grades.push(dxz === 0 ? 0 : (dy / dxz) * 100);
+        }
+        grades.push(grades[grades.length - 1]);
+        const segmentColors = grades.map(g => getGradeColor(g));
+
+for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[i], p1 = points[i+1];
+    const c0 = segmentColors[i], c1 = segmentColors[i+1];
+
+    // top vertices
+    const t0 = [p0.x, p0.y, p0.z];
+    const t1 = [p1.x, p1.y, p1.z];
+
+    // bottom vertices
+    const b0 = [p0.x, bottomY, p0.z];
+    const b1 = [p1.x, bottomY, p1.z];
+
+    // push all 4 vertices (no sharing with next segment!)
+    positions.push(...t0, ...t1, ...b0, ...b1);
+
+    // assign segment color to all 4 vertices of this segment
+    const c0a = [c0.r, c0.g, c0.b, 1];
+    const c1a = [c1.r, c1.g, c1.b, 1];
+    colorsArray.push(...c0a, ...c0a, ...c0a, ...c0a); // all same color per segment
+
+    indices.push(baseIndex, baseIndex+1, baseIndex+2, baseIndex+1, baseIndex+3, baseIndex+2);
+    baseIndex += 4;
+}
+
+        const fill = new BABYLON.Mesh("flatFill", scene);
+        fill.setVerticesData(BABYLON.VertexBuffer.PositionKind, positions);
+        fill.setVerticesData(BABYLON.VertexBuffer.ColorKind, colorsArray);
+        fill.setIndices(indices);
+        const mat = new BABYLON.StandardMaterial("fillMat", scene);
+        mat.alpha = 1;
+        mat.emissiveColor = new BABYLON.Color3(1,1,1);
+        mat.vertexColorMode = BABYLON.Constants.VERTEXCOLOR_USE_COLORS;
+        mat.backFaceCulling = false;
+        fill.material = mat;
+
+        // ===== Simple thin route line on top (single color) =====
+        const line = BABYLON.MeshBuilder.CreateLines("routeLine", { points: points }, scene);
+        line.color = new BABYLON.Color3(0.75, 0.75, 0.75);
+
+        // ===== Marker + Arrow =====
+        // small invisible point (we'll place arrow and a small sphere for fallback)
+        const marker = BABYLON.MeshBuilder.CreateSphere("marker",{diameter:0.001},scene);
+        marker.isVisible = false;
+
+        // Create arrow (cone) above route pointing down
+        // Babylon doesn't have CreateCone across all versions; use cylinder with top=0 (a cone)
+        const arrowHeight = 0.6;
+        const arrow = BABYLON.MeshBuilder.CreateCylinder("arrow", {
+            height: arrowHeight,
+            diameterTop: 0.0,
+            diameterBottom: 0.25,
+            tessellation: 12
+        }, scene);
+        arrow.rotation.x = Math.PI; // point downwards
+        arrow.position.y = bottomY + arrowHeight * 1.2; // initial place; updated each frame
+        // use emissive dark color for visibility
+        const arrowMat = new BABYLON.StandardMaterial("arrowMat", scene);
+        arrowMat.emissiveColor = new BABYLON.Color3(0.95, 0.3, 0.2);
+        arrow.material = arrowMat;
+        arrow.alwaysSelectAsActiveMesh = true;
+
+        const cursorEl = document.querySelector(".elev-cursor");
+
+        // Main update: read cursor position (left in %) and convert to distance along route
+        function updateMarkerFromCursor() {
+            if (!cursorEl) return;
+            const m = cursorEl.style.left.match(/([\d.]+)%/);
+            if (!m) return;
+            const pct = parseFloat(m[1]) / 100;
+            if (!isFinite(pct)) return;
+
+            const targetDist = pct * totalDist;
+            const i = findSegmentIndexByDist(targetDist);
+            const segStart = cum[i];
+            const segEnd = cum[i+1];
+            const segLen = segEnd - segStart || 1;
+            const localT = (targetDist - segStart) / segLen;
+
+            // interpolate in points (scene coords)
+            const p0 = points[i];
+            const p1 = points[i+1];
+            const pos = p0.add(p1.subtract(p0).scale(localT));
+
+            marker.position.copyFrom(pos);
+
+            // place arrow above the marker and point down
+            const arrowOffset = 0.4; // vertical offset above line (scene units)
+            arrow.position.set(pos.x, pos.y + arrowOffset, pos.z);
+            // keep arrow facing down (we already rotated it); optionally match camera rotation if desired
+
+            // optionally clamp camera target (camera will follow marker in render loop)
+        }
+
+        // initial update
+        updateMarkerFromCursor();
+
+        // ===== Render loop - keep camera target on marker (follows marker) =====
+        engine.runRenderLoop(() => {
+            updateMarkerFromCursor();
+
+            // camera target locked to marker
+            camera.setTarget(marker.position);
+
+            // ensure camera radius not too small
+            if (camera.radius < camera.lowerRadiusLimit) camera.radius = camera.lowerRadiusLimit;
+            if (camera.radius > camera.upperRadiusLimit) camera.radius = camera.upperRadiusLimit;
+
+            scene.render();
+        });
+
+        window.addEventListener("resize", () => engine.resize());
+    }
+
+})();
