@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name          Biketerra 3D Route Viewer
 // @namespace     http://tampermonkey.net/
-// @version       1.2.1
+// @version       1.2.2
 // @description   Adds a 3D Babylon.js elevation route to Biketerra ride & spectate pages. Uses pre-loaded JSON or intercepts fetch.
 // @author        Josef/chatgpt/gemini
 // @match         https://biketerra.com/ride*
@@ -71,7 +71,7 @@ window.fetch = async function(resource, options) {
             check();
         });
     }
-async function waitForIntercept(timeout = 3000) {
+async function waitForIntercept(timeout = 10000) {
     const start = performance.now();
     while (!interceptedRouteJson) {
         if (performance.now() - start > timeout) return false;
@@ -235,11 +235,14 @@ async function waitForIntercept(timeout = 3000) {
         if (distKm > 30) sceneScale = 50;
         if (distKm > 60) sceneScale = 80;
         if (distKm > 120) sceneScale = 150;
+        if (distKm > 200) sceneScale = 180;
 
         let yExag = 0.005;
         if (distKm > 30) yExag = 0.008;
         if (distKm > 60) yExag = 0.012;
         if (distKm > 120) yExag = 0.02;
+        if (distKm > 200) yExag = 0.036;
+
 
 
         const points = raw.map((p,i) => new BABYLON.Vector3(
