@@ -219,15 +219,8 @@ async function waitForIntercept(timeout = 3000) {
         const xRange = xMax - xMin, zRange = zMax - zMin;
         const maxXZ = Math.max(xRange, zRange) || 1;
 
-        const yExag = 0.005; // vertical exaggeration factor (adjust)
 
-        const points = raw.map((p,i) => new BABYLON.Vector3(
-            (xVals[i] - (xMin + xMax)/2) / maxXZ * 20,
-            (yVals[i] - yMin) * yExag,
-            (zVals[i] - (zMin + zMax)/2) / maxXZ * 20
-        ));
-
-        // ===== CUMULATIVE DISTANCES (meters) - horizontal distance in meters from xVals,zVals =====
+                // ===== CUMULATIVE DISTANCES (meters) - horizontal distance in meters from xVals,zVals =====
         const cum = new Array(xVals.length).fill(0);
         for (let i = 1; i < xVals.length; i++) {
             const dx = xVals[i] - xVals[i-1];
@@ -235,6 +228,27 @@ async function waitForIntercept(timeout = 3000) {
             cum[i] = cum[i-1] + Math.hypot(dx, dz);
         }
         const totalDist = cum[cum.length - 1] || 1;
+        const distKm = totalDist / 1000;
+     //   const yExag = 0.005; // vertical exaggeration factor (adjust)
+      //  const sceneScale = 120;  // instead of 20
+        let sceneScale = 20;
+        if (distKm > 30) sceneScale = 50;
+        if (distKm > 60) sceneScale = 80;
+        if (distKm > 120) sceneScale = 150;
+
+        let yExag = 0.005;
+        if (distKm > 30) yExag = 0.008;
+        if (distKm > 60) yExag = 0.012;
+        if (distKm > 120) yExag = 0.02;
+
+
+        const points = raw.map((p,i) => new BABYLON.Vector3(
+            (xVals[i] - (xMin + xMax)/2) / maxXZ * sceneScale,
+            (yVals[i] - yMin) * yExag,
+            (zVals[i] - (zMin + zMax)/2) / maxXZ * sceneScale
+        ));
+
+
 
         // binary search helper to find index i such that cum[i] <= d <= cum[i+1]
         function findSegmentIndexByDist(d) {
