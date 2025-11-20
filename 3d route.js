@@ -167,8 +167,8 @@ async function waitForIntercept(timeout = 10000) {
         } else {
             // 3. Fallback: Perform the fetch (Original script's fallback)
             console.warn("[3D Viewer] Fallback to new fetch for route JSON:", url);
-            //const resp = await fetch(url);
-            //j = await resp.json();
+            const resp = await fetch(url);
+            j = await resp.json();
             return;
 
         }
