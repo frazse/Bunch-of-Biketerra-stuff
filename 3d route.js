@@ -71,7 +71,7 @@ window.fetch = async function(resource, options) {
             check();
         });
     }
-async function waitForIntercept(timeout = 10000) {
+async function waitForIntercept(timeout = 3000) {
     const start = performance.now();
     while (!interceptedRouteJson) {
         if (performance.now() - start > timeout) return false;
@@ -234,12 +234,17 @@ async function waitForIntercept(timeout = 10000) {
         if (distKm > 60) sceneScale = 80;
         if (distKm > 120) sceneScale = 150;
         if (distKm > 200) sceneScale = 200;
+        if (distKm > 500) sceneScale = 500;
+        if (distKm > 1000) sceneScale = 1000;
+        if (distKm > 2000) sceneScale = 2000;
+
+
 
         let yExag = 0.01;
-        if (distKm > 30) yExag = 0.013;
-        if (distKm > 60) yExag = 0.017;
-        if (distKm > 120) yExag = 0.025;
-        if (distKm > 200) yExag = 0.041;
+        //if (distKm > 30) yExag = 0.013;
+        //if (distKm > 60) yExag = 0.017;
+       // if (distKm > 120) yExag = 0.025;
+       // if (distKm > 200) yExag = 0.041;
 
 console.log(
     `[3D Viewer] Route length = ${distKm.toFixed(2)} km — sceneScale = ${sceneScale}, yExag = ${yExag}`
@@ -377,8 +382,13 @@ for (let i = 0; i < points.length - 1; i++) {
         fill.material = mat;
 
         // ===== Simple thin route line on top (single color) =====
-        const line = BABYLON.MeshBuilder.CreateLines("routeLine", { points: points }, scene);
-        line.color = new BABYLON.Color3(0.75, 0.75, 0.75);
+   const line = BABYLON.MeshBuilder.CreateLines("routeLine", {
+       points: points,
+       colors: points.map(() => new BABYLON.Color4(0.75,0.75,0.75,1)),
+       updatable: false,
+       instance: null,
+   }, scene);
+
 
         // ===== Marker + Arrow =====
         // small invisible point (we'll place arrow and a small sphere for fallback)
