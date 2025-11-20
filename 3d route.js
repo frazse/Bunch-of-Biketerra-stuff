@@ -169,8 +169,6 @@ async function waitForIntercept(timeout = 10000) {
             console.warn("[3D Viewer] Fallback to new fetch for route JSON:", url);
             const resp = await fetch(url);
             j = await resp.json();
-            return;
-
         }
 
         if (!j) {
@@ -237,13 +235,15 @@ async function waitForIntercept(timeout = 10000) {
         if (distKm > 120) sceneScale = 150;
         if (distKm > 200) sceneScale = 200;
 
-        let yExag = 0.005;
-        if (distKm > 30) yExag = 0.008;
-        if (distKm > 60) yExag = 0.012;
-        if (distKm > 120) yExag = 0.02;
-        if (distKm > 200) yExag = 0.036;
+        let yExag = 0.01;
+        if (distKm > 30) yExag = 0.013;
+        if (distKm > 60) yExag = 0.017;
+        if (distKm > 120) yExag = 0.025;
+        if (distKm > 200) yExag = 0.041;
 
-
+console.log(
+    `[3D Viewer] Route length = ${distKm.toFixed(2)} km — sceneScale = ${sceneScale}, yExag = ${yExag}`
+);
 
         const points = raw.map((p,i) => new BABYLON.Vector3(
             (xVals[i] - (xMin + xMax)/2) / maxXZ * sceneScale,
