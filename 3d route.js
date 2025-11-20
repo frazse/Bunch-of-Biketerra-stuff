@@ -20,33 +20,38 @@
 
     // --- Interception Logic (Must run immediately) ---
     const originalFetch = window.fetch;
-    window.fetch = async function(...args) {
-        const [resource, options] = args;
+window.fetch = async function(resource, options) {
+    let url = null;
 
-        // Check if the request is for the route JSON
-        if (typeof resource === 'string' && resource.includes('/__data.json')) {
-            // Perform the original fetch
-            const response = await originalFetch(resource, options);
+    // Handle Request object
+    if (resource instanceof Request) {
+        url = resource.url;
+    }
+    // Handle string URL
+    else if (typeof resource === "string") {
+        url = resource;
+    }
 
-            // Clone the response so we can read the body twice (once for the site, once for us)
-            const clonedResponse = response.clone();
+    // Detect the JSON request
+    const isRouteJson = url && url.includes("/__data.json");
 
-            // Read and store the JSON data
-            try {
-                const data = await clonedResponse.json();
-                interceptedRouteJson = data;
-                console.log('[3D Viewer] Intercepted route JSON from fetch request.');
-            } catch (e) {
-                console.error('[3D Viewer] Error parsing intercepted JSON:', e);
-            }
+    if (isRouteJson) {
+        const response = await originalFetch(resource, options);
+        const clone = response.clone();
 
-            // Return the original response to the caller
-            return response;
-        }
+        try {
+            interceptedRouteJson = await clone.json();
+            console.log("[3D Viewer] Intercepted JSON via fetch override");
+        } catch (e) {
+            console.error("[3D Viewer] Intercept parse error:", e);
+        }
 
-        // Not the JSON we're looking for, just call original fetch
-        return originalFetch.apply(this, args);
-    };
+        return response;
+    }
+
+    return originalFetch(resource, options);
+};
+
     // -------------------------------------------------
 
 
