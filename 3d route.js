@@ -71,6 +71,14 @@ window.fetch = async function(resource, options) {
             check();
         });
     }
+async function waitForIntercept(timeout = 3000) {
+    const start = performance.now();
+    while (!interceptedRouteJson) {
+        if (performance.now() - start > timeout) return false;
+        await new Promise(r => setTimeout(r, 10));
+    }
+    return true;
+}
 
     waitFor(".elev-cursor").then(() => {
         console.log("[3D Viewer] Page ready — launching viewer…");
@@ -112,6 +120,8 @@ window.fetch = async function(resource, options) {
 
 
         // ===== Use INTERCEPTED JSON first, then preloaded Remix, then fetch =====
+        await waitForIntercept();
+
         let j = null;
 
         // 1. Try Intercepted Data
@@ -157,8 +167,10 @@ window.fetch = async function(resource, options) {
         } else {
             // 3. Fallback: Perform the fetch (Original script's fallback)
             console.warn("[3D Viewer] Fallback to new fetch for route JSON:", url);
-            const resp = await fetch(url);
-            j = await resp.json();
+            //const resp = await fetch(url);
+            //j = await resp.json();
+            return;
+
         }
 
         if (!j) {
