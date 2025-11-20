@@ -235,7 +235,7 @@ async function waitForIntercept(timeout = 10000) {
         if (distKm > 30) sceneScale = 50;
         if (distKm > 60) sceneScale = 80;
         if (distKm > 120) sceneScale = 150;
-        if (distKm > 200) sceneScale = 180;
+        if (distKm > 200) sceneScale = 200;
 
         let yExag = 0.005;
         if (distKm > 30) yExag = 0.008;
