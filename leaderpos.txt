@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Biketerra LeaderOverlay
+// @name         Biketerra LeaderOverlay v1.5
 // @namespace    http://tampermonkey.net/
-// @version      1.4
-// @description  Shows the leader's position on the elevation graph using .elev-cursor + Manual route/climb options + Toggle settings menu
+// @version      1.5
+// @description  Shows leader position on elevation graph relative to you with smooth animation + settings menu
 // @author       Josef
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate/*
@@ -13,7 +13,7 @@
 
 (function () {
     'use strict';
-    console.log("[Leader Overlay] Script started");
+    console.log("[LeaderOverlay v1.5] Script started");
 
     const checkInterval = 500;
 
@@ -22,14 +22,14 @@
     let autoDetect = true;
 
     let routeLength = 0;
-    let overlay, logContainer, startLine, endLine, leaderLine, myPosLine;
+    let overlay, logContainer, leaderLine, myPosLine;
     let settingsBox = null;
     let gearButton = null;
 
     let currentMyX = 0, currentLeaderX = 0;
 
     // ============================
-    //      SETTINGS BOX
+    // SETTINGS BOX
     // ============================
     function createSettingsBox() {
         if (settingsBox) return settingsBox;
@@ -56,10 +56,8 @@
             </label><br><br>
             Route length (km):<br>
             <input id="manualRoute" type="number" step="0.1" style="width:120px"><br><br>
-
             Total climb (m):<br>
             <input id="manualClimb" type="number" step="1" style="width:120px"><br><br>
-
             <button id="applyOverlaySettings">Apply</button>
         `;
 
@@ -90,7 +88,7 @@
     }
 
     // ============================
-    //       OVERLAY WINDOW
+    // OVERLAY
     // ============================
     function createOverlay() {
         if (overlay) return overlay;
@@ -131,7 +129,6 @@
             userSelect: "none",
             zIndex: 10000
         });
-
         overlay.appendChild(gearButton);
 
         gearButton.onclick = () => {
@@ -157,124 +154,122 @@
 
         const height = overlay.clientHeight * 0.8;
 
-        startLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        startLine.setAttribute("stroke", "white");
-        startLine.setAttribute("stroke-width", 0);
-        svg.appendChild(startLine);
-
-        endLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        endLine.setAttribute("stroke", "white");
-        endLine.setAttribute("stroke-width", 0);
-        svg.appendChild(endLine);
-
+        // My position line
         myPosLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        myPosLine.setAttribute("y1", 0);
-        myPosLine.setAttribute("y2", height);
         myPosLine.setAttribute("stroke", "lime");
         myPosLine.setAttribute("stroke-width", 2);
+        myPosLine.setAttribute("y1", 0);
+        myPosLine.setAttribute("y2", height);
         svg.appendChild(myPosLine);
 
+        // Leader line
         leaderLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        leaderLine.setAttribute("y1", 0);
-        leaderLine.setAttribute("y2", height);
         leaderLine.setAttribute("stroke", "red");
         leaderLine.setAttribute("stroke-width", 2);
+        leaderLine.setAttribute("y1", 0);
+        leaderLine.setAttribute("y2", height);
         svg.appendChild(leaderLine);
 
         return overlay;
     }
 
     // ============================
-    //       POSITION READER
+    // POSITION READER
     // ============================
-function getLeaderAndMyPos() {
-    let leaderPercent = null;
+    function getLeaderAndMyPos() {
+        let myPercent = 0;
+        let leaderPercent = 0;
 
-    // My position via .elev-cursor
-    let myPercent = 0;
-    const cursor = document.querySelector('.elev-cursor');
-    if (cursor) {
-        const match = cursor.style.left.match(/([\d.]+)%/);
-        if (match) myPercent = parseFloat(match[1]);
-    }
+        // --- My position from .elev-cursor ---
+        const cursor = document.querySelector('.elev-cursor');
+        if (cursor) {
+            const match = cursor.style.left.match(/([\d.]+)%/);
+            if (match) myPercent = parseFloat(match[1]);
+        }
 
-    // Auto-detect route length
-    if (autoDetect && routeLength === 0 && manualRouteLength === null) {
-        const statsGrid = document.querySelector(".stats-grid");
-        if (statsGrid) {
-            const rows = statsGrid.querySelectorAll(".stat-row.svelte-1wfcwp8");
-            if (rows.length >= 3) {
-                const valEl = rows[2].querySelector(".avg-value.svelte-1wfcwp8");
-                if (valEl) routeLength = parseFloat(valEl.textContent.trim()) || 0;
+        // --- Auto-detect route length ---
+        if (autoDetect && routeLength === 0 && manualRouteLength === null) {
+            const statsGrid = document.querySelector(".stats-grid");
+            if (statsGrid) {
+                const rows = statsGrid.querySelectorAll(".stat-row.svelte-1wfcwp8");
+                if (rows.length >= 3) {
+                    const valEl = rows[2].querySelector(".avg-value.svelte-1wfcwp8");
+                    if (valEl) routeLength = parseFloat(valEl.textContent.trim()) || 0;
+                }
             }
         }
-    }
 
-    // Leader logic
-    const ridersMain = document.querySelector(".riders-main");
+        const ridersMain = document.querySelector(".riders-main");
 
-    if (!ridersMain) {
-        // Rider list missing → you are the leader
-        leaderPercent = myPercent;
-    } else {
+        if (!ridersMain) {
+            leaderPercent = myPercent;
+            return { myPercent, leaderPercent };
+        }
+
         const firstRider = ridersMain.querySelector(".rider");
         if (!firstRider) {
-            // No riders in list → you are the leader
             leaderPercent = myPercent;
-        } else {
-            const nameEl = firstRider.querySelector(".rider-name");
-            const distEl = firstRider.querySelector(".rider-distance .monospace");
+            return { myPercent, leaderPercent };
+        }
 
-            if (nameEl && (nameEl.textContent.trim().toLowerCase() === "you" || nameEl.textContent.trim().toLowerCase().includes("spectating"))) {
-                leaderPercent = myPercent;
-            } else if (distEl && routeLength > 0) {
-                let numberText = distEl.textContent.trim();
-                let unitText = "km";
+        const nameEl = firstRider.querySelector(".rider-name");
+        const distEl = firstRider.querySelector(".rider-distance .monospace");
 
-                let nextNode = distEl.nextSibling;
-                while (nextNode) {
-                    if (nextNode.nodeType === Node.TEXT_NODE && nextNode.textContent.trim()) {
-                        unitText = nextNode.textContent.trim().toLowerCase();
-                        break;
-                    }
-                    nextNode = nextNode.nextSibling;
-                }
+        if (nameEl && nameEl.textContent.trim().toLowerCase().includes("you")) {
+            leaderPercent = myPercent;
+            return { myPercent, leaderPercent };
+        }
 
-                let value = parseFloat(numberText) || 0;
-                if (unitText.includes("meter")) value /= 1000;
+        // --- Leader offset relative to you ---
+        if (distEl && routeLength > 0) {
+            const text = distEl.textContent.trim();
+            const match = text.match(/([+-]?[\d,.]+)\s*(km|m|meter|meters)?/i);
 
-                leaderPercent = (value / routeLength) * 100;
+            if (match) {
+                let offset = parseFloat(match[1].replace(',', '.'));
+                const unit = match[2] ? match[2].toLowerCase() : 'km';
+                if (unit.includes('m')) offset /= 1000; // meters → km
+
+                const leaderAbsKm = (myPercent / 100) * routeLength + offset;
+                leaderPercent = Math.min(100, Math.max(0, (leaderAbsKm / routeLength) * 100));
             } else {
-                // fallback
                 leaderPercent = myPercent;
             }
+        } else {
+            leaderPercent = myPercent;
         }
+
+        return { myPercent, leaderPercent };
     }
 
-    return { leaderPercent, myPercent };
-}
-
+    // ============================
+    // OVERLAY UPDATE
+    // ============================
 function updateOverlay() {
     const overlay = createOverlay();
     const pos = getLeaderAndMyPos();
 
-    if (!routeLength) return; // wait until route length known
+    if (!routeLength) return;
 
-    const width = overlay.clientWidth;
+    const width = overlay.getBoundingClientRect().width || 1;
+    const height = overlay.clientHeight * 0.8;
 
-    // Smooth animation
-    currentMyX += ((pos.myPercent / 100) * width - currentMyX) * 0.6;
-    currentLeaderX += ((pos.leaderPercent / 100) * width - currentLeaderX) * 0.6;
+    // --- Direct positions (no smoothing) ---
+    const myX = (pos.myPercent / 100) * width;
+    const leaderX = (pos.leaderPercent / 100) * width;
 
-    myPosLine.setAttribute("x1", currentMyX);
-    myPosLine.setAttribute("x2", currentMyX);
+    myPosLine.setAttribute("x1", myX);
+    myPosLine.setAttribute("x2", myX);
+    myPosLine.setAttribute("y1", 0);
+    myPosLine.setAttribute("y2", height);
 
-    leaderLine.setAttribute("x1", currentLeaderX);
-    leaderLine.setAttribute("x2", currentLeaderX);
+    leaderLine.setAttribute("x1", leaderX);
+    leaderLine.setAttribute("x2", leaderX);
+    leaderLine.setAttribute("y1", 0);
+    leaderLine.setAttribute("y2", height);
 
-    //logContainer.textContent = `Leader=${pos.leaderPercent.toFixed(2)}% | You=${pos.myPercent.toFixed(2)}% | Route=${routeLength} km`;
+    logContainer.textContent = `Leader=${pos.leaderPercent.toFixed(4)}% | You=${pos.myPercent.toFixed(4)}% | Route=${routeLength} km`;
 }
-
 
     setInterval(updateOverlay, checkInterval);
 
