@@ -38,7 +38,12 @@ map.addControl(drawControl);
 let gpxPoints = [], gpxLayer = null, selectionShape = null;
 let refLayer = L.layerGroup().addTo(map);
 let tgtLayer = L.layerGroup().addTo(map);
-let referencePath = [];
+let referencePath = []; // for snapToPath
+
+// Helper function to introduce a delay for OSRM rate limiting
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 // Load GPX
 document.getElementById('gpxFile').addEventListener('change', async e => {
@@ -53,7 +58,8 @@ function loadGPX(gpxText){
     let xml = parser.parseFromString(gpxText, "application/xml");
     let geo = toGeoJSON.gpx(xml);
     gpxPoints = geo.features[0].geometry.coordinates.map(c => ({ lon:c[0], lat:c[1], ele:c[2]||0 }));
-    referencePath = gpxPoints.map(p => ({...p}));
+    // 💡 CRITICAL: Ensure referencePath is set ONLY ONCE from the original data
+    referencePath = gpxPoints.map(p => ({...p})); // Deep copy of points
 
     if(gpxLayer) map.removeLayer(gpxLayer);
     gpxLayer = L.polyline(gpxPoints.map(p=>[p.lat,p.lon]), {color:'red'}).addTo(map);
@@ -70,17 +76,29 @@ map.on(L.Draw.Event.CREATED, function(event) {
 // Check if point is inside selection
 function pointInSelection(p){
     if(!selectionShape) return false;
+    
+    // Handle L.Rectangle (Rectangular selection)
     if(selectionShape instanceof L.Rectangle){
         const b = selectionShape.getBounds();
         return p.lat>=b.getSouth() && p.lat<=b.getNorth() && p.lon>=b.getWest() && p.lon<=b.getEast();
+    
+    // Handle L.Polygon (Freeform selection)
     } else if(selectionShape instanceof L.Polygon){
-        const poly = selectionShape.getLatLngs()[0];
-        const x = p.lat, y = p.lon;
+        // Get the coordinates of the polygon vertices
+        const poly = selectionShape.getLatLngs()[0]; // Assumes a single outer ring
+        const x = p.lat, y = p.lon; // Point coordinates
+        
         let inside = false;
+        
+        // Ray-casting algorithm (checks intersections)
         for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
             const xi = poly[i].lat, yi = poly[i].lng;
             const xj = poly[j].lat, yj = poly[j].lng;
-            const intersect = ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+            
+            // Check if the ray from the point intersects the segment (i, j)
+            const intersect = ((yi > y) != (yj > y)) && 
+                              (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+            
             if(intersect) inside=!inside;
         }
         return inside;
@@ -88,7 +106,174 @@ function pointInSelection(p){
     return false;
 }
 
-// Densify path
+// Project point onto segment (only used by snapArea now, but kept)
+function projectPointOnSegment(p,a,b){
+    const ax=a.lon, ay=a.lat, bx=b.lon, by=b.lat, px=p.lon, py=p.lat;
+    const abx=bx-ax, aby=by-ay;
+    const t=Math.max(0,Math.min(1,((px-ax)*abx+(py-ay)*aby)/(abx*abx+aby*aby)));
+    return { lon: ax + t*abx, lat: ay + t*aby, ele: a.ele + t*(b.ele - a.ele) };
+}
+
+// Snap selected area (Geometric snap to self - logic remains the same)
+function snapArea() {
+    if (!selectionShape || gpxPoints.length === 0) return;
+
+    // Get indices of points inside selection
+    let insideIndices = gpxPoints.map((p,i) => pointInSelection(p) ? i : -1).filter(i => i >= 0);
+    if (insideIndices.length < 2) { alert("Select at least 2 points."); return; }
+
+    // Sort points by cumulative distance along GPX
+    const cumDist = [0];
+    for (let i = 1; i < gpxPoints.length; i++) {
+        const dx = gpxPoints[i].lon - gpxPoints[i-1].lon;
+        const dy = gpxPoints[i].lat - gpxPoints[i-1].lat;
+        cumDist.push(cumDist[i-1] + Math.sqrt(dx*dx + dy*dy));
+    }
+    insideIndices.sort((a,b) => cumDist[a] - cumDist[b]);
+
+    // Split into reference (first half) and target (second half)
+    const mid = Math.floor(insideIndices.length / 2);
+    const refIdx = insideIndices.slice(0, mid);
+    const tgtIdx = insideIndices.slice(mid);
+
+    refLayer.clearLayers();
+    tgtLayer.clearLayers();
+
+    refIdx.forEach(i => L.circleMarker([gpxPoints[i].lat,gpxPoints[i].lon], {radius:4,color:'blue',fillColor:'blue',fillOpacity:0.9}).addTo(refLayer));
+    tgtIdx.forEach(i => L.circleMarker([gpxPoints[i].lat,gpxPoints[i].lon], {radius:4,color:'orange',fillColor:'orange',fillOpacity:0.9}).addTo(tgtLayer));
+
+    const refPoints = refIdx.map(i => gpxPoints[i]);
+    const tgtPoints = tgtIdx.map(i => gpxPoints[i]);
+
+    // Compute cumulative distances along reference
+    const refDist = [0];
+    for (let i = 1; i < refPoints.length; i++) {
+        const dx = refPoints[i].lon - refPoints[i-1].lon;
+        const dy = refPoints[i].lat - refPoints[i-1].lat;
+        refDist.push(refDist[i-1] + Math.sqrt(dx*dx + dy*dy));
+    }
+
+    // --- GEOMETRIC SNAP AND RE-ORDER FIX START ---
+    const snappedTargetData = [];
+
+    for (let k = 0; k < tgtPoints.length; k++) {
+        const p = tgtPoints[k];
+        let bestSnappedPoint = null;
+        let bestDistanceSquared = Infinity;
+        let snapDistOnRef = 0; 
+
+        for (let j = 0; j < refPoints.length - 1; j++) {
+            const a = refPoints[j];
+            const b = refPoints[j+1];
+            
+            const snapped = projectPointOnSegment(p, a, b); 
+            
+            const dx = snapped.lon - p.lon;
+            const dy = snapped.lat - p.lat;
+            const distSq = dx * dx + dy * dy;
+
+            if (distSq < bestDistanceSquared) {
+                bestDistanceSquared = distSq;
+                bestSnappedPoint = snapped;
+                
+                const distToA = Math.sqrt((snapped.lon - a.lon)**2 + (snapped.lat - a.lat)**2);
+                snapDistOnRef = refDist[j] + distToA;
+            }
+        }
+        
+        if (bestSnappedPoint) {
+            snappedTargetData.push({
+                originalIndex: tgtIdx[k],
+                snappedPoint: bestSnappedPoint,
+                distOnRef: snapDistOnRef
+            });
+        }
+    }
+
+    // 2. Sort the Snapped Target Data by their Position along the Reference Path
+    snappedTargetData.sort((a, b) => a.distOnRef - b.distOnRef);
+
+    // 3. Update the Original GPX Points Array using the Sorted Data
+    snappedTargetData.forEach((data, k) => {
+        const originalGPXIndex = data.originalIndex;
+        gpxPoints[originalGPXIndex] = data.snappedPoint;
+    });
+
+    // --- GEOMETRIC SNAP AND RE-ORDER FIX END ---
+
+    // Redraw polyline
+    if (gpxLayer) map.removeLayer(gpxLayer);
+    gpxLayer = L.polyline(gpxPoints.map(p => [p.lat, p.lon]), {color:'blue'}).addTo(map);
+}
+
+// 🟢 UPDATED FUNCTION: Snap to External Path using OSRM Match Service
+async function snapToExternalPath() {
+    if (!selectionShape || gpxPoints.length === 0) return;
+    const indices = gpxPoints.map((p, i) => pointInSelection(p) ? i : -1).filter(i => i >= 0);
+    if (indices.length === 0) {
+        alert("Select at least one point to snap.");
+        return;
+    }
+
+    tgtLayer.clearLayers();
+    
+    // Sort indices by their position in the full GPX track to maintain correct sequence for Match service
+    indices.sort((a, b) => a - b); 
+
+    // Extract the coordinates of the selected points in OSRM's required lon,lat;lon,lat format
+    const coordinatesString = indices.map(i => `${gpxPoints[i].lon},${gpxPoints[i].lat}`).join(';');
+    
+    // OSRM Match Service URL
+    // We request the geometry as polyline for easy processing
+    const OSRM_URL = `https://router.project-osrm.org/match/v1/driving/${coordinatesString}?overview=full&geometries=geojson`;
+
+    console.log(`Attempting to map-match ${indices.length} points to the road network...`);
+    
+    // Show a temporary loading indicator (optional, but good practice)
+    document.getElementById('snapPathBtn').disabled = true;
+
+    try {
+        const response = await fetch(OSRM_URL);
+        const data = await response.json();
+
+        if (data.code === 'Ok' && data.tracepoints && data.matchings && data.matchings.length > 0) {
+            
+            // The tracepoints array maps back to the original input points
+            data.tracepoints.forEach((tp, k) => {
+                // tp will be null if the point could not be matched
+                if (tp !== null) {
+                    const originalIndex = indices[k];
+                    const snappedCoord = tp.location; // [lon, lat]
+                    
+                    // Update the GPX point with the snapped coordinates
+                    gpxPoints[originalIndex].lon = snappedCoord[0];
+                    gpxPoints[originalIndex].lat = snappedCoord[1];
+                    
+                    // Visual feedback for the snapped point (green dot)
+                    L.circleMarker([gpxPoints[originalIndex].lat, gpxPoints[originalIndex].lon], { radius: 4, color: 'green', fillColor: 'green', fillOpacity: 0.9 }).addTo(tgtLayer);
+                }
+            });
+
+            // Redraw the polyline with the newly snapped points
+            if (gpxLayer) map.removeLayer(gpxLayer);
+            gpxLayer = L.polyline(gpxPoints.map(p => [p.lat, p.lon]), { color: 'green' }).addTo(map);
+
+            console.log("Map-matching complete. Path redrawn.");
+
+        } else if (data.code === 'NoSegment') {
+             alert("Snapping failed: One or more points could not snap to a street segment. Check if the points are too far from any road/trail.");
+        } else {
+            console.warn(`OSRM match failed: ${data.code}`, data);
+            alert(`Snapping failed: OSRM returned code ${data.code}`);
+        }
+    } catch (error) {
+        console.error(`Error during OSRM API call:`, error);
+        alert("An error occurred during the network request.");
+    } finally {
+         document.getElementById('snapPathBtn').disabled = false;
+    }
+}
+// Densify path (No longer used by external snap, but kept for completeness)
 function densifyPath(points, step=0.00001){
     const densified=[];
     for(let i=0;i<points.length-1;i++){
@@ -104,100 +289,11 @@ function densifyPath(points, step=0.00001){
     return densified;
 }
 
-// Interpolate along path by fraction
-function interpolateAlongPath(path, fraction){
-    const cumDist = [0];
-    for(let i=1;i<path.length;i++){
-        const dx = path[i].lon - path[i-1].lon;
-        const dy = path[i].lat - path[i-1].lat;
-        cumDist.push(cumDist[i-1] + Math.sqrt(dx*dx + dy*dy));
-    }
-    const totalDist = cumDist[cumDist.length-1];
-    const targetDist = fraction * totalDist;
+document.getElementById('snapBtn').onclick = snapArea;
+// 💡 IMPORTANT: Update the snapPathBtn to use the new external snapping function
+document.getElementById('snapPathBtn').onclick = snapToExternalPath; 
 
-    for(let i=1;i<path.length;i++){
-        const segDist = cumDist[i]-cumDist[i-1];
-        if(cumDist[i-1]<=targetDist && targetDist<=cumDist[i]){
-            const t = (targetDist-cumDist[i-1])/segDist;
-            return {
-                lat: path[i-1].lat + t*(path[i].lat-path[i-1].lat),
-                lon: path[i-1].lon + t*(path[i].lon-path[i-1].lon),
-                ele: path[i-1].ele + t*(path[i].ele-path[i-1].ele)
-            };
-        }
-    }
-    return path[path.length-1];
-}
-
-// --- SNAP SELECTED AREA WITH EXACT ALIGNMENT ---
-function snapAreaExact(){
-    if (!selectionShape || gpxPoints.length===0) return;
-    let insideIndices = gpxPoints.map((p,i)=>pointInSelection(p)?i:-1).filter(i=>i>=0);
-    if(insideIndices.length<2){ alert("Select at least 2 points."); return; }
-
-    const mid = Math.floor(insideIndices.length/2);
-    const refIdx = insideIndices.slice(0,mid);
-    const tgtIdx = insideIndices.slice(mid);
-
-    refLayer.clearLayers(); tgtLayer.clearLayers();
-
-    refIdx.forEach(i=>L.circleMarker([gpxPoints[i].lat,gpxPoints[i].lon],{radius:4,color:'blue',fillColor:'blue',fillOpacity:0.9}).addTo(refLayer));
-    tgtIdx.forEach(i=>L.circleMarker([gpxPoints[i].lat,gpxPoints[i].lon],{radius:4,color:'orange',fillColor:'orange',fillOpacity:0.9}).addTo(tgtLayer));
-
-    const refPoints = refIdx.map(i=>gpxPoints[i]);
-    const tgtPoints = tgtIdx.map(i=>gpxPoints[i]);
-
-    const densifiedRef = densifyPath(refPoints,0.00001);
-
-    const n = tgtPoints.length;
-    const fractions = tgtPoints.map((_,k)=>(k+1)/(n+1));
-
-    fractions.forEach((f,k)=>{
-        const idx = tgtIdx[k];
-        gpxPoints[idx] = interpolateAlongPath(densifiedRef,f);
-    });
-
-    if(gpxLayer) map.removeLayer(gpxLayer);
-    gpxLayer = L.polyline(gpxPoints.map(p=>[p.lat,p.lon]),{color:'blue'}).addTo(map);
-}
-
-// --- SNAP TO EXTERNAL PATH USING OSRM ---
-async function snapToExternalPath() {
-    if (!selectionShape || gpxPoints.length === 0) return;
-    const indices = gpxPoints.map((p, i) => pointInSelection(p) ? i : -1).filter(i => i >= 0);
-    if (indices.length === 0) { alert("Select at least one point to snap."); return; }
-
-    tgtLayer.clearLayers();
-    indices.sort((a, b) => a - b);
-
-    const coordinatesString = indices.map(i => `${gpxPoints[i].lon},${gpxPoints[i].lat}`).join(';');
-    const OSRM_URL = `https://router.project-osrm.org/match/v1/driving/${coordinatesString}?overview=full&geometries=geojson`;
-
-    document.getElementById('snapPathBtn').disabled = true;
-
-    try {
-        const response = await fetch(OSRM_URL);
-        const data = await response.json();
-        if (data.code === 'Ok' && data.tracepoints && data.matchings.length > 0) {
-            data.tracepoints.forEach((tp, k) => {
-                if (tp !== null) {
-                    const originalIndex = indices[k];
-                    const snappedCoord = tp.location;
-                    gpxPoints[originalIndex].lon = snappedCoord[0];
-                    gpxPoints[originalIndex].lat = snappedCoord[1];
-                    L.circleMarker([gpxPoints[originalIndex].lat, gpxPoints[originalIndex].lon], { radius: 4, color: 'green', fillColor: 'green', fillOpacity: 0.9 }).addTo(tgtLayer);
-                }
-            });
-            if (gpxLayer) map.removeLayer(gpxLayer);
-            gpxLayer = L.polyline(gpxPoints.map(p => [p.lat, p.lon]), { color: 'green' }).addTo(map);
-        } else {
-            alert(`Snapping failed: OSRM returned code ${data.code}`);
-        }
-    } catch (error) { console.error(error); alert("Error during OSRM API call."); }
-    finally { document.getElementById('snapPathBtn').disabled = false; }
-}
-
-// --- GENERATE AND DOWNLOAD GPX ---
+// Download GPX
 function generateGPX(){
     let gpx=`<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="GPX Snap Tool">\n<trk><trkseg>`;
     gpxPoints.forEach(p=> gpx+=`\n<trkpt lat="${p.lat}" lon="${p.lon}"><ele>${p.ele}</ele></trkpt>`);
@@ -205,13 +301,9 @@ function generateGPX(){
     return gpx;
 }
 
-document.getElementById('snapBtn').onclick = snapAreaExact;
-document.getElementById('snapPathBtn').onclick = snapToExternalPath; 
 document.getElementById('downloadBtn').onclick = ()=>{
     const blob = new Blob([generateGPX()], {type:'application/gpx+xml'});
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href=url; a.download='snapped.gpx'; a.click();
 };
-</script>
-</body>
-</html>
+</script></html>
