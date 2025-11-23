@@ -115,23 +115,15 @@ function projectPointOnSegment(p,a,b){
 }
 
 // Snap selected area (Geometric snap to self - logic remains the same)
+// --- UPDATED snapArea WITH DENSIFICATION + INTERPOLATION ---
 function snapArea() {
     if (!selectionShape || gpxPoints.length === 0) return;
 
-    // Get indices of points inside selection
+    // 1️⃣ Get indices of points inside selection
     let insideIndices = gpxPoints.map((p,i) => pointInSelection(p) ? i : -1).filter(i => i >= 0);
     if (insideIndices.length < 2) { alert("Select at least 2 points."); return; }
 
-    // Sort points by cumulative distance along GPX
-    const cumDist = [0];
-    for (let i = 1; i < gpxPoints.length; i++) {
-        const dx = gpxPoints[i].lon - gpxPoints[i-1].lon;
-        const dy = gpxPoints[i].lat - gpxPoints[i-1].lat;
-        cumDist.push(cumDist[i-1] + Math.sqrt(dx*dx + dy*dy));
-    }
-    insideIndices.sort((a,b) => cumDist[a] - cumDist[b]);
-
-    // Split into reference (first half) and target (second half)
+    // 2️⃣ Split into reference (first half) and target (second half)
     const mid = Math.floor(insideIndices.length / 2);
     const refIdx = insideIndices.slice(0, mid);
     const tgtIdx = insideIndices.slice(mid);
@@ -145,63 +137,49 @@ function snapArea() {
     const refPoints = refIdx.map(i => gpxPoints[i]);
     const tgtPoints = tgtIdx.map(i => gpxPoints[i]);
 
-    // Compute cumulative distances along reference
+    // 3️⃣ Densify reference path to improve projection accuracy
+    const densifiedRef = densifyPath(refPoints, 0.00001); // smaller step = higher precision
+
+    // 4️⃣ Compute cumulative distances along densified reference
     const refDist = [0];
-    for (let i = 1; i < refPoints.length; i++) {
-        const dx = refPoints[i].lon - refPoints[i-1].lon;
-        const dy = refPoints[i].lat - refPoints[i-1].lat;
+    for (let i = 1; i < densifiedRef.length; i++) {
+        const dx = densifiedRef[i].lon - densifiedRef[i-1].lon;
+        const dy = densifiedRef[i].lat - densifiedRef[i-1].lat;
         refDist.push(refDist[i-1] + Math.sqrt(dx*dx + dy*dy));
     }
+    const totalRefDist = refDist[refDist.length-1];
 
-    // --- GEOMETRIC SNAP AND RE-ORDER FIX START ---
-    const snappedTargetData = [];
+    // 5️⃣ Snap each target point by finding closest point along densified reference
+    const snappedTargetData = tgtPoints.map((p, k) => {
+        let bestPoint = null;
+        let bestDistSq = Infinity;
+        let bestRefFraction = 0;
 
-    for (let k = 0; k < tgtPoints.length; k++) {
-        const p = tgtPoints[k];
-        let bestSnappedPoint = null;
-        let bestDistanceSquared = Infinity;
-        let snapDistOnRef = 0; 
+        for (let i = 0; i < densifiedRef.length; i++) {
+            const dx = p.lon - densifiedRef[i].lon;
+            const dy = p.lat - densifiedRef[i].lat;
+            const distSq = dx*dx + dy*dy;
 
-        for (let j = 0; j < refPoints.length - 1; j++) {
-            const a = refPoints[j];
-            const b = refPoints[j+1];
-            
-            const snapped = projectPointOnSegment(p, a, b); 
-            
-            const dx = snapped.lon - p.lon;
-            const dy = snapped.lat - p.lat;
-            const distSq = dx * dx + dy * dy;
-
-            if (distSq < bestDistanceSquared) {
-                bestDistanceSquared = distSq;
-                bestSnappedPoint = snapped;
-                
-                const distToA = Math.sqrt((snapped.lon - a.lon)**2 + (snapped.lat - a.lat)**2);
-                snapDistOnRef = refDist[j] + distToA;
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                bestPoint = densifiedRef[i];
+                bestRefFraction = refDist[i] / totalRefDist; // fraction along ref path
             }
         }
-        
-        if (bestSnappedPoint) {
-            snappedTargetData.push({
-                originalIndex: tgtIdx[k],
-                snappedPoint: bestSnappedPoint,
-                distOnRef: snapDistOnRef
-            });
-        }
-    }
 
-    // 2. Sort the Snapped Target Data by their Position along the Reference Path
-    snappedTargetData.sort((a, b) => a.distOnRef - b.distOnRef);
-
-    // 3. Update the Original GPX Points Array using the Sorted Data
-    snappedTargetData.forEach((data, k) => {
-        const originalGPXIndex = data.originalIndex;
-        gpxPoints[originalGPXIndex] = data.snappedPoint;
+        return {
+            originalIndex: tgtIdx[k],
+            fraction: bestRefFraction
+        };
     });
 
-    // --- GEOMETRIC SNAP AND RE-ORDER FIX END ---
+    // 6️⃣ Interpolate snapped positions exactly along reference path
+    snappedTargetData.forEach(data => {
+        const idx = data.originalIndex;
+        gpxPoints[idx] = interpolateAlongPath(densifiedRef, data.fraction);
+    });
 
-    // Redraw polyline
+    // 7️⃣ Redraw GPX polyline
     if (gpxLayer) map.removeLayer(gpxLayer);
     gpxLayer = L.polyline(gpxPoints.map(p => [p.lat, p.lon]), {color:'blue'}).addTo(map);
 }
