@@ -44,6 +44,49 @@ let referencePath = []; // for snapToPath
 function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
+// Insert extra points at sharp angles to make curves smoother
+function smoothSharpTurns(points, angleThresholdDeg = 20, extraPoints = 3) {
+
+    function angle(a, b, c) {
+        const abx = b.lon - a.lon, aby = b.lat - a.lat;
+        const cbx = b.lon - c.lon, cby = b.lat - c.lat;
+
+        const dot = abx * cbx + aby * cby;
+        const mag1 = Math.sqrt(abx*abx + aby*aby);
+        const mag2 = Math.sqrt(cbx*cbx + cby*cby);
+
+        if (mag1 === 0 || mag2 === 0) return 180;
+
+        return Math.acos(dot / (mag1 * mag2)) * (180 / Math.PI);
+    }
+
+    const result = [points[0]];
+
+    for (let i = 1; i < points.length - 1; i++) {
+        const a = points[i - 1];
+        const b = points[i];
+        const c = points[i + 1];
+
+        const ang = angle(a, b, c);
+
+        if (ang < angleThresholdDeg) {
+            // 🔥 SHARP TURN! → insert extraPoints interpolated values
+            for (let j = 1; j <= extraPoints; j++) {
+                const t = j / (extraPoints + 1);
+                result.push({
+                    lat: b.lat * (1 - t) + c.lat * t,
+                    lon: b.lon * (1 - t) + c.lon * t,
+                    ele:  b.ele * (1 - t) + c.ele * t // keep elevation smooth
+                });
+            }
+        }
+
+        result.push(b);
+    }
+
+    result.push(points[points.length - 1]);
+    return result;
+}
 
 // Load GPX
 document.getElementById('gpxFile').addEventListener('change', async e => {
@@ -291,14 +334,20 @@ async function snapToExternalPath() {
         const totalOsrmDist = osrmDist[osrmDist.length - 1];
 
         // Create new points with elevation interpolated from the original GPX section
-        const newPoints = denseGeom.map((coord, i) => {
-            const fraction = osrmDist[i] / totalOsrmDist;
-            return {
-                lon: coord[0],
-                lat: coord[1],
-                ele: interpolateElevation(fraction)
-            };
-        });
+let newPoints = denseGeom.map((coord, i) => {
+    const fraction = osrmDist[i] / totalOsrmDist;
+    return {
+        lon: coord[0],
+        lat: coord[1],
+        ele: interpolateElevation(fraction)
+    };
+});
+
+// 🔥 NEW: Smooth sharp turns further
+newPoints = smoothSharpTurns(newPoints, 20, 3);
+// angleThresholdDeg = 20°
+// extraPoints = 3
+
 
         // Replace old segment with new smooth & elevated OSRM geometry
         gpxPoints = [
