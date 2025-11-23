@@ -310,10 +310,11 @@ async function snapToExternalPath() {
         tgtLayer.clearLayers();
 
         if (gpxLayer) map.removeLayer(gpxLayer);
-        gpxLayer = L.polyline(
-            gpxPoints.map(p => [p.lat, p.lon]),
-            { color: "green" }
-        ).addTo(map);
+gpxLayer = L.polyline(
+    gpxPoints.map(p => [p.lat, p.lon]),
+    { color: "green" }
+).addTo(map);
+drawPointMarkers();
 
         console.log("OSRM geometry inserted with elevation preservation:", newPoints.length, "points");
 
