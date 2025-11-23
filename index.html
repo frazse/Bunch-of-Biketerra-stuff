@@ -38,12 +38,14 @@ map.addControl(drawControl);
 let gpxPoints = [], gpxLayer = null, selectionShape = null;
 let refLayer = L.layerGroup().addTo(map);
 let tgtLayer = L.layerGroup().addTo(map);
+let pointLayer = L.layerGroup().addTo(map);
 let referencePath = []; // for snapToPath
 
 // Helper function to introduce a delay for OSRM rate limiting
 function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
+
 // Insert extra points at sharp angles to make curves smoother
 function smoothSharpTurns(points, angleThresholdDeg = 20, extraPoints = 3) {
 
@@ -57,8 +59,12 @@ function smoothSharpTurns(points, angleThresholdDeg = 20, extraPoints = 3) {
 
         if (mag1 === 0 || mag2 === 0) return 180;
 
-        return Math.acos(dot / (mag1 * mag2)) * (180 / Math.PI);
+        // clamp for numerical safety
+        const cosv = Math.max(-1, Math.min(1, dot / (mag1 * mag2)));
+        return Math.acos(cosv) * (180 / Math.PI);
     }
+
+    if (!points || points.length < 3) return points.slice();
 
     const result = [points[0]];
 
@@ -70,13 +76,13 @@ function smoothSharpTurns(points, angleThresholdDeg = 20, extraPoints = 3) {
         const ang = angle(a, b, c);
 
         if (ang < angleThresholdDeg) {
-            // 🔥 SHARP TURN! → insert extraPoints interpolated values
+            // Insert points between b and c
             for (let j = 1; j <= extraPoints; j++) {
                 const t = j / (extraPoints + 1);
                 result.push({
                     lat: b.lat * (1 - t) + c.lat * t,
                     lon: b.lon * (1 - t) + c.lon * t,
-                    ele:  b.ele * (1 - t) + c.ele * t // keep elevation smooth
+                    ele:  b.ele * (1 - t) + c.ele * t
                 });
             }
         }
@@ -86,6 +92,71 @@ function smoothSharpTurns(points, angleThresholdDeg = 20, extraPoints = 3) {
 
     result.push(points[points.length - 1]);
     return result;
+}
+
+// Densify path
+function densifyPath(points, step=0.00001){
+    if (!points || points.length < 2) return points.slice();
+    const densified=[];
+    for(let i=0;i<points.length-1;i++){
+        const a=points[i], b=points[i+1];
+        const dx=b.lon-a.lon, dy=b.lat-a.lat, dz=(b.ele||0)-(a.ele||0);
+        const dist=Math.sqrt(dx*dx+dy*dy);
+        const n = Math.max(1, Math.ceil(dist/step));
+        for(let j=0;j<n;j++){
+            const t = j / n;
+            densified.push({
+                lat: a.lat + (b.lat - a.lat) * t,
+                lon: a.lon + (b.lon - a.lon) * t,
+                ele: (a.ele || 0) + dz * t
+            });
+        }
+    }
+    densified.push(points[points.length-1]);
+    return densified;
+}
+
+// Interpolate along path by fraction (0..1)
+function interpolateAlongPath(path, fraction){
+    if (!path || path.length === 0) return null;
+    const cumDist = [0];
+    for(let i=1;i<path.length;i++){
+        const dx = path[i].lon - path[i-1].lon;
+        const dy = path[i].lat - path[i-1].lat;
+        cumDist.push(cumDist[i-1] + Math.sqrt(dx*dx + dy*dy));
+    }
+    const totalDist = cumDist[cumDist.length-1];
+    if (totalDist === 0) return {...path[0]};
+
+    const targetDist = fraction * totalDist;
+
+    for(let i=1;i<path.length;i++){
+        if (cumDist[i-1] <= targetDist && targetDist <= cumDist[i]) {
+            const segDist = cumDist[i] - cumDist[i-1];
+            const t = segDist === 0 ? 0 : (targetDist - cumDist[i-1]) / segDist;
+            return {
+                lat: path[i-1].lat + t*(path[i].lat-path[i-1].lat),
+                lon: path[i-1].lon + t*(path[i].lon-path[i-1].lon),
+                ele: (path[i-1].ele||0) + t*((path[i].ele||0)-(path[i-1].ele||0))
+            };
+        }
+    }
+    return {...path[path.length-1]};
+}
+
+// Draw point markers for visibility
+function drawPointMarkers() {
+    pointLayer.clearLayers();
+    if (!gpxPoints) return;
+    gpxPoints.forEach(p => {
+        L.circleMarker([p.lat, p.lon], {
+            radius: 3,
+            color: "blue",
+            weight: 1,
+            fillColor: "white",
+            fillOpacity: 1
+        }).addTo(pointLayer);
+    });
 }
 
 // Load GPX
@@ -101,11 +172,11 @@ function loadGPX(gpxText){
     let xml = parser.parseFromString(gpxText, "application/xml");
     let geo = toGeoJSON.gpx(xml);
     gpxPoints = geo.features[0].geometry.coordinates.map(c => ({ lon:c[0], lat:c[1], ele:c[2]||0 }));
-    // 💡 CRITICAL: Ensure referencePath is set ONLY ONCE from the original data
     referencePath = gpxPoints.map(p => ({...p})); // Deep copy of points
 
     if(gpxLayer) map.removeLayer(gpxLayer);
     gpxLayer = L.polyline(gpxPoints.map(p=>[p.lat,p.lon]), {color:'red'}).addTo(map);
+    drawPointMarkers();
     map.fitBounds(gpxLayer.getBounds());
 }
 
@@ -119,29 +190,17 @@ map.on(L.Draw.Event.CREATED, function(event) {
 // Check if point is inside selection
 function pointInSelection(p){
     if(!selectionShape) return false;
-    
-    // Handle L.Rectangle (Rectangular selection)
     if(selectionShape instanceof L.Rectangle){
         const b = selectionShape.getBounds();
         return p.lat>=b.getSouth() && p.lat<=b.getNorth() && p.lon>=b.getWest() && p.lon<=b.getEast();
-    
-    // Handle L.Polygon (Freeform selection)
     } else if(selectionShape instanceof L.Polygon){
-        // Get the coordinates of the polygon vertices
-        const poly = selectionShape.getLatLngs()[0]; // Assumes a single outer ring
-        const x = p.lat, y = p.lon; // Point coordinates
-        
+        const poly = selectionShape.getLatLngs()[0];
+        const x = p.lat, y = p.lon;
         let inside = false;
-        
-        // Ray-casting algorithm (checks intersections)
         for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
             const xi = poly[i].lat, yi = poly[i].lng;
             const xj = poly[j].lat, yj = poly[j].lng;
-            
-            // Check if the ray from the point intersects the segment (i, j)
-            const intersect = ((yi > y) != (yj > y)) && 
-                              (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-            
+            const intersect = ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
             if(intersect) inside=!inside;
         }
         return inside;
@@ -149,35 +208,32 @@ function pointInSelection(p){
     return false;
 }
 
-// Project point onto segment (only used by snapArea now, but kept)
+// Project point onto segment
 function projectPointOnSegment(p,a,b){
     const ax=a.lon, ay=a.lat, bx=b.lon, by=b.lat, px=p.lon, py=p.lat;
     const abx=bx-ax, aby=by-ay;
-    const t=Math.max(0,Math.min(1,((px-ax)*abx+(py-ay)*aby)/(abx*abx+aby*aby)));
-    return { lon: ax + t*abx, lat: ay + t*aby, ele: a.ele + t*(b.ele - a.ele) };
+    const denom = (abx*abx+aby*aby);
+    const t = denom === 0 ? 0 : Math.max(0,Math.min(1,((px-ax)*abx+(py-ay)*aby)/denom));
+    return { lon: ax + t*abx, lat: ay + t*aby, ele: (a.ele||0) + t*((b.ele||0)-(a.ele||0)), t: t };
 }
 
-// Snap selected area (Geometric snap to self - logic remains the same)
+// --- PROGRESSIVE FORWARD-ONLY SNAP (fixes 90° kinks) ---
 function snapArea() {
     if (!selectionShape || gpxPoints.length === 0) return;
 
-    // Get indices of points inside selection
+    // Get indices of points inside selection (in track order)
     let insideIndices = gpxPoints.map((p,i) => pointInSelection(p) ? i : -1).filter(i => i >= 0);
     if (insideIndices.length < 2) { alert("Select at least 2 points."); return; }
 
-    // Sort points by cumulative distance along GPX
-    const cumDist = [0];
-    for (let i = 1; i < gpxPoints.length; i++) {
-        const dx = gpxPoints[i].lon - gpxPoints[i-1].lon;
-        const dy = gpxPoints[i].lat - gpxPoints[i-1].lat;
-        cumDist.push(cumDist[i-1] + Math.sqrt(dx*dx + dy*dy));
-    }
-    insideIndices.sort((a,b) => cumDist[a] - cumDist[b]);
+    // Sort by their position along the full GPX (maintain track order)
+    insideIndices.sort((a,b) => a - b);
 
     // Split into reference (first half) and target (second half)
     const mid = Math.floor(insideIndices.length / 2);
     const refIdx = insideIndices.slice(0, mid);
     const tgtIdx = insideIndices.slice(mid);
+
+    if (refIdx.length < 2) { alert("Need at least 2 reference points."); return; }
 
     refLayer.clearLayers();
     tgtLayer.clearLayers();
@@ -188,70 +244,68 @@ function snapArea() {
     const refPoints = refIdx.map(i => gpxPoints[i]);
     const tgtPoints = tgtIdx.map(i => gpxPoints[i]);
 
-    // Compute cumulative distances along reference
+    // Densify reference path for fine-grained snapping
+    const densifiedRef = densifyPath(refPoints, 0.00001);
+
+    // Precompute cumulative distance along densified reference
     const refDist = [0];
-    for (let i = 1; i < refPoints.length; i++) {
-        const dx = refPoints[i].lon - refPoints[i-1].lon;
-        const dy = refPoints[i].lat - refPoints[i-1].lat;
+    for (let i = 1; i < densifiedRef.length; i++) {
+        const dx = densifiedRef[i].lon - densifiedRef[i-1].lon;
+        const dy = densifiedRef[i].lat - densifiedRef[i-1].lat;
         refDist.push(refDist[i-1] + Math.sqrt(dx*dx + dy*dy));
     }
+    const totalRefDist = refDist[refDist.length - 1];
 
-    // --- GEOMETRIC SNAP AND RE-ORDER FIX START ---
-    const snappedTargetData = [];
-
+    // Progressive forward-only snapping
+    let lastSegIndex = 0; // never go backwards
     for (let k = 0; k < tgtPoints.length; k++) {
         const p = tgtPoints[k];
-        let bestSnappedPoint = null;
-        let bestDistanceSquared = Infinity;
-        let snapDistOnRef = 0; 
+        let best = null;
+        let bestDistSq = Infinity;
+        let bestSeg = lastSegIndex;
+        let bestDistToA = 0;
 
-        for (let j = 0; j < refPoints.length - 1; j++) {
-            const a = refPoints[j];
-            const b = refPoints[j+1];
-            
-            const snapped = projectPointOnSegment(p, a, b); 
-            
-            const dx = snapped.lon - p.lon;
-            const dy = snapped.lat - p.lat;
-            const distSq = dx * dx + dy * dy;
-
-            if (distSq < bestDistanceSquared) {
-                bestDistanceSquared = distSq;
-                bestSnappedPoint = snapped;
-                
-                const distToA = Math.sqrt((snapped.lon - a.lon)**2 + (snapped.lat - a.lat)**2);
-                snapDistOnRef = refDist[j] + distToA;
+        // Search only forward from lastSegIndex to end
+        for (let j = lastSegIndex; j < densifiedRef.length - 1; j++) {
+            const a = densifiedRef[j];
+            const b = densifiedRef[j+1];
+            const proj = projectPointOnSegment(p, a, b); // returns {lon,lat,ele,t}
+            const dx = proj.lon - p.lon;
+            const dy = proj.lat - p.lat;
+            const distSq = dx*dx + dy*dy;
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                best = proj;
+                bestSeg = j;
+                // dist from a to projected point along segment
+                const distToA = Math.sqrt((proj.lon - a.lon)**2 + (proj.lat - a.lat)**2);
+                bestDistToA = distToA;
             }
         }
-        
-        if (bestSnappedPoint) {
-            snappedTargetData.push({
-                originalIndex: tgtIdx[k],
-                snappedPoint: bestSnappedPoint,
-                distOnRef: snapDistOnRef
-            });
+
+        if (best) {
+            // compute fraction along densifiedRef
+            const distOnRef = refDist[bestSeg] + bestDistToA;
+            const fraction = totalRefDist === 0 ? 0 : (distOnRef / totalRefDist);
+            const idxInGPX = tgtIdx[k];
+            // Interpolate exact position on densifiedRef by fraction (keeps perfect alignment)
+            const interp = interpolateAlongPath(densifiedRef, fraction);
+            if (interp) {
+                gpxPoints[idxInGPX] = interp;
+            }
+            // advance lastSegIndex so next point can't snap backward
+            lastSegIndex = bestSeg;
         }
     }
 
-    // 2. Sort the Snapped Target Data by their Position along the Reference Path
-    snappedTargetData.sort((a, b) => a.distOnRef - b.distOnRef);
-
-    // 3. Update the Original GPX Points Array using the Sorted Data
-    snappedTargetData.forEach((data, k) => {
-        const originalGPXIndex = data.originalIndex;
-        gpxPoints[originalGPXIndex] = data.snappedPoint;
-    });
-
-    // --- GEOMETRIC SNAP AND RE-ORDER FIX END ---
-
-    // Redraw polyline
+    // Redraw polyline + points
     if (gpxLayer) map.removeLayer(gpxLayer);
     gpxLayer = L.polyline(gpxPoints.map(p => [p.lat, p.lon]), {color:'blue'}).addTo(map);
+    drawPointMarkers();
 }
 
 // 🟢 UPDATED FUNCTION: Snap to External Path using OSRM Match Service
-// 🟢 NEW VERSION — Replaces selected range with dense OSRM geometry
-// 🟢 NEW VERSION — Inserts OSRM geometry AND preserves elevation by interpolation
+// Replaces selected range with dense OSRM geometry and preserves elevation by interpolation
 async function snapToExternalPath() {
     if (!selectionShape || gpxPoints.length === 0) return;
 
@@ -278,7 +332,7 @@ async function snapToExternalPath() {
         const dy = originalSegment[i].lat - originalSegment[i-1].lat;
         origDist.push(origDist[i - 1] + Math.sqrt(dx*dx + dy*dy));
     }
-    const totalOrigDist = origDist[origDist.length - 1];
+    const totalOrigDist = origDist[origDist.length - 1] || 0.000001;
 
     // Function to interpolate elevation based on distance fraction
     function interpolateElevation(fraction) {
@@ -287,16 +341,13 @@ async function snapToExternalPath() {
 
         const targetDist = fraction * totalOrigDist;
 
-        // find segment
         for (let i = 0; i < origDist.length - 1; i++) {
             if (origDist[i] <= targetDist && origDist[i+1] >= targetDist) {
-                const span = origDist[i+1] - origDist[i];
+                const span = origDist[i+1] - origDist[i] || 1;
                 const localF = (targetDist - origDist[i]) / span;
-                return originalSegment[i].ele +
-                       localF * (originalSegment[i+1].ele - originalSegment[i].ele);
+                return originalSegment[i].ele + localF * (originalSegment[i+1].ele - originalSegment[i].ele);
             }
         }
-
         return originalSegment[originalSegment.length - 1].ele;
     }
 
@@ -331,23 +382,20 @@ async function snapToExternalPath() {
             const dy = denseGeom[i][1] - denseGeom[i-1][1];
             osrmDist.push(osrmDist[i - 1] + Math.sqrt(dx*dx + dy*dy));
         }
-        const totalOsrmDist = osrmDist[osrmDist.length - 1];
+        const totalOsrmDist = osrmDist[osrmDist.length - 1] || 0.000001;
 
         // Create new points with elevation interpolated from the original GPX section
-let newPoints = denseGeom.map((coord, i) => {
-    const fraction = osrmDist[i] / totalOsrmDist;
-    return {
-        lon: coord[0],
-        lat: coord[1],
-        ele: interpolateElevation(fraction)
-    };
-});
+        let newPoints = denseGeom.map((coord, i) => {
+            const fraction = osrmDist[i] / totalOsrmDist;
+            return {
+                lon: coord[0],
+                lat: coord[1],
+                ele: interpolateElevation(fraction)
+            };
+        });
 
-// 🔥 NEW: Smooth sharp turns further
-newPoints = smoothSharpTurns(newPoints, 20, 3);
-// angleThresholdDeg = 20°
-// extraPoints = 3
-
+        // Smooth sharp turns further
+        newPoints = smoothSharpTurns(newPoints, 20, 3);
 
         // Replace old segment with new smooth & elevated OSRM geometry
         gpxPoints = [
@@ -364,6 +412,9 @@ newPoints = smoothSharpTurns(newPoints, 20, 3);
             { color: "green" }
         ).addTo(map);
 
+        // Draw all points for visibility
+        drawPointMarkers();
+
         console.log("OSRM geometry inserted with elevation preservation:", newPoints.length, "points");
 
     } catch (err) {
@@ -374,24 +425,7 @@ newPoints = smoothSharpTurns(newPoints, 20, 3);
     }
 }
 
-// Densify path (No longer used by external snap, but kept for completeness)
-function densifyPath(points, step=0.00001){
-    const densified=[];
-    for(let i=0;i<points.length-1;i++){
-        const a=points[i], b=points[i+1];
-        const dx=b.lon-a.lon, dy=b.lat-a.lat, dz=b.ele-a.ele;
-        const dist=Math.sqrt(dx*dx+dy*dy);
-        const n=Math.ceil(dist/step);
-        for(let j=0;j<n;j++){
-            densified.push({lat:a.lat + dy*j/n, lon:a.lon + dx*j/n, ele:a.ele + dz*j/n});
-        }
-    }
-    densified.push(points[points.length-1]);
-    return densified;
-}
-
 document.getElementById('snapBtn').onclick = snapArea;
-// 💡 IMPORTANT: Update the snapPathBtn to use the new external snapping function
 document.getElementById('snapPathBtn').onclick = snapToExternalPath; 
 
 // Download GPX
@@ -407,4 +441,6 @@ document.getElementById('downloadBtn').onclick = ()=>{
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href=url; a.download='snapped.gpx'; a.click();
 };
-</script></html>
+</script>
+</body>
+</html>
