@@ -21,6 +21,7 @@
   <input type="file" id="gpxFile" accept=".gpx"> 
   <button id="snapBtn">Snap Selected Area</button>
   <button id="snapPathBtn">Snap to Path</button>
+  <button id="smoothBtn">Smooth Selected Turns</button>
   <button id="downloadBtn">Download Updated GPX</button>
 </div>
 
@@ -441,6 +442,96 @@ document.getElementById('downloadBtn').onclick = ()=>{
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href=url; a.download='snapped.gpx'; a.click();
 };
+  // === Smooth the selected section by replacing sharp turns with curved Bezier arcs ===
+function smoothSelectedSection() {
+    if (!selectionShape || gpxPoints.length === 0) {
+        alert("No selection.");
+        return;
+    }
+
+    // find indices inside selection
+    let indices = gpxPoints
+        .map((p,i) => pointInSelection(p) ? i : -1)
+        .filter(i => i >= 0);
+
+    if (indices.length < 3) {
+        alert("Select at least a short section with multiple points.");
+        return;
+    }
+
+    indices.sort((a,b)=>a-b);
+
+    const start = indices[0];
+    const end   = indices[indices.length-1];
+
+    const section = gpxPoints.slice(start, end+1);
+
+    // ---- Build new smoothed section ----
+    let newSection = [];
+    const Ncurve = 20;      // number of points per turn curve
+    const angThreshold = 40; // angle threshold (deg)
+
+    function angle(a,b,c){
+        const abx=b.lon-a.lon, aby=b.lat-a.lat;
+        const cbx=b.lon-c.lon, cby=b.lat-c.lat;
+        const dot=abx*cbx+aby*cby;
+        const mag1=Math.sqrt(abx*abx+aby*aby);
+        const mag2=Math.sqrt(cbx*cbx+cby*cby);
+        if(!mag1||!mag2) return 180;
+        return Math.acos(Math.max(-1,Math.min(1,dot/(mag1*mag2))))*(180/Math.PI);
+    }
+
+    function bezier(p0,p1,p2,t){
+        const u=1-t;
+        return {
+            lat: u*u*p0.lat + 2*u*t*p1.lat + t*t*p2.lat,
+            lon: u*u*p0.lon + 2*u*t*p1.lon + t*t*p2.lon,
+            ele: u*u*p0.ele + 2*u*t*p1.ele + t*t*p2.ele,
+        };
+    }
+
+    newSection.push(section[0]);
+
+    for (let i=1;i<section.length-1;i++){
+        const a = section[i-1];
+        const b = section[i];
+        const c = section[i+1];
+
+        const ang = angle(a,b,c);
+
+        if (ang < angThreshold){
+            // create a Bezier control point slightly toward the outside
+            const ctrl = {
+                lat: b.lat,
+                lon: b.lon,
+                ele: b.ele
+            };
+
+            // generate curve
+            for (let t=0; t<=1; t+=1/Ncurve){
+                newSection.push(bezier(a, ctrl, c, t));
+            }
+        } else {
+            newSection.push(b);
+        }
+    }
+
+    newSection.push(section[section.length-1]);
+
+    // --- Replace original section ---
+    gpxPoints = [
+        ...gpxPoints.slice(0, start),
+        ...newSection,
+        ...gpxPoints.slice(end+1)
+    ];
+
+    // redraw
+    if (gpxLayer) map.removeLayer(gpxLayer);
+    gpxLayer = L.polyline(gpxPoints.map(p=>[p.lat,p.lon]), {color:"purple"}).addTo(map);
+    drawPointMarkers();
+}
+document.getElementById("smoothBtn").onclick = smoothSelectedSection;
+
 </script>
 </body>
 </html>
