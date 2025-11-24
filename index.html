@@ -2,99 +2,131 @@
 <html>
 <head>
 <meta charset="utf-8" />
-<title>GPX Snap/Align Tool</title>
+<title>GPX Snap/Align Tool — Smooth Turns + Undo/Redo + Preview</title>
 <style>
   body { font-family: sans-serif; margin:0; padding:0; }
-  #map { width: 100%; height: 80vh; border-bottom: 2px solid #ccc; }
-  #controls { padding: 10px; }
-  button, input { padding: 8px 14px; margin-right:10px; }
+  #map { width: 100%; height: 68vh; border-bottom: 2px solid #ccc; }
+  #controls { padding: 10px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  button, input[type="file"] { padding: 8px 12px; }
+  .small { padding:6px 10px; font-size:13px; }
+  #params { display:flex; align-items:center; gap:8px; margin-left:8px; }
+  label { font-size:13px; color:#333; }
+  #log { height: 140px; overflow:auto; border-top: 1px solid #ddd; padding: 8px; background:#f9f9f9; font-family: monospace; font-size:13px; }
+  .status-ok { color: green; }
+  .status-err { color: #b30000; }
 </style>
+
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/togeojson/0.16.0/togeojson.min.js"></script>
 </head>
 <body>
 <div id="map"></div>
+
 <div id="controls">
-  <input type="file" id="gpxFile" accept=".gpx"> 
+  <input type="file" id="gpxFile" accept=".gpx">
   <button id="snapBtn">Snap Selected Area</button>
-  <button id="snapPathBtn">Snap to Path</button>
-  <button id="downloadBtn">Download Updated GPX</button>
+  <button id="snapPathBtn">Snap to Path (OSRM)</button>
+
+  <button id="undoBtn" class="small">Undo</button>
+  <button id="redoBtn" class="small">Redo</button>
+
+  <button id="smoothBtn" class="small">Apply Smooth Turn</button>
+
+  <div id="params">
+    <label>Tension <input id="tension" type="range" min="0" max="1" step="0.01" value="0.6"></label>
+    <span id="tensionVal">0.60</span>
+    <label>Resolution <input id="resolution" type="range" min="4" max="80" step="1" value="30"></label>
+    <span id="resolutionVal">30</span>
+    <label style="margin-left:6px;"><input id="preserveHeading" type="checkbox" checked> Preserve End Heading</label>
+    <label style="margin-left:6px;"><input id="livePreview" type="checkbox" checked> Live Preview</label>
+  </div>
+
+  <button id="downloadBtn" style="margin-left:auto;">Download Updated GPX</button>
 </div>
 
+<div id="log" aria-live="polite"></div>
+
 <script>
-let map = L.map('map').setView([0,0], 2);
+/* ============================
+   Map + controls initialisation
+   ============================ */
+let map = L.map('map').setView([60.0, 18.0], 6);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
 
 let editableLayers = new L.FeatureGroup().addTo(map);
 let drawControl = new L.Control.Draw({
     draw: { polygon:true, rectangle:true, polyline:false, circle:false, circlemarker:false, marker:false },
-    edit: { featureGroup: editableLayers }
+    edit: { featureGroup: editableLayers, edit: true, remove: true }
 });
 map.addControl(drawControl);
 
+/* Layers and state */
 let gpxPoints = [], gpxLayer = null, selectionShape = null;
 let refLayer = L.layerGroup().addTo(map);
 let tgtLayer = L.layerGroup().addTo(map);
 let pointLayer = L.layerGroup().addTo(map);
-let referencePath = []; // for snapToPath
+let referencePath = []; // backup
+let previewLayer = L.layerGroup().addTo(map);
 
-// Helper function to introduce a delay for OSRM rate limiting
-function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+/* Undo/Redo stacks (full-state) */
+const undoStack = [];
+const redoStack = [];
+const MAX_HISTORY = 50;
+
+/* Logging helper */
+function log(msg, cls) {
+    const t = new Date().toLocaleTimeString();
+    const node = document.createElement('div');
+    node.innerHTML = `<span style="color:#666">[${t}]</span> ${msg}`;
+    if (cls === 'err') node.classList.add('status-err');
+    if (cls === 'ok') node.classList.add('status-ok');
+    document.getElementById('log').appendChild(node);
+    document.getElementById('log').scrollTop = document.getElementById('log').scrollHeight;
 }
 
-// Insert extra points at sharp angles to make curves smoother
-function smoothSharpTurns(points, angleThresholdDeg = 20, extraPoints = 3) {
+/* Small delay helper */
+function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
-    function angle(a, b, c) {
-        const abx = b.lon - a.lon, aby = b.lat - a.lat;
-        const cbx = b.lon - c.lon, cby = b.lat - c.lat;
-
-        const dot = abx * cbx + aby * cby;
-        const mag1 = Math.sqrt(abx*abx + aby*aby);
-        const mag2 = Math.sqrt(cbx*cbx + cby*cby);
-
-        if (mag1 === 0 || mag2 === 0) return 180;
-
-        // clamp for numerical safety
-        const cosv = Math.max(-1, Math.min(1, dot / (mag1 * mag2)));
-        return Math.acos(cosv) * (180 / Math.PI);
-    }
-
-    if (!points || points.length < 3) return points.slice();
-
-    const result = [points[0]];
-
-    for (let i = 1; i < points.length - 1; i++) {
-        const a = points[i - 1];
-        const b = points[i];
-        const c = points[i + 1];
-
-        const ang = angle(a, b, c);
-
-        if (ang < angleThresholdDeg) {
-            // Insert points between b and c
-            for (let j = 1; j <= extraPoints; j++) {
-                const t = j / (extraPoints + 1);
-                result.push({
-                    lat: b.lat * (1 - t) + c.lat * t,
-                    lon: b.lon * (1 - t) + c.lon * t,
-                    ele:  b.ele * (1 - t) + c.ele * t
-                });
-            }
-        }
-
-        result.push(b);
-    }
-
-    result.push(points[points.length - 1]);
-    return result;
+/* Save/restore for undo */
+function pushHistory() {
+    // store deep copy
+    undoStack.push(JSON.parse(JSON.stringify(gpxPoints)));
+    if (undoStack.length > MAX_HISTORY) undoStack.shift();
+    // clear redo on new action
+    redoStack.length = 0;
+    updateUndoButtons();
+}
+function undo() {
+    if (undoStack.length === 0) { log("Nothing to undo."); return; }
+    const prev = undoStack.pop();
+    redoStack.push(JSON.parse(JSON.stringify(gpxPoints)));
+    gpxPoints = prev;
+    refreshTrack();
+    updateUndoButtons();
+    log("Undo applied", 'ok');
+}
+function redo() {
+    if (redoStack.length === 0) { log("Nothing to redo."); return; }
+    const next = redoStack.pop();
+    undoStack.push(JSON.parse(JSON.stringify(gpxPoints)));
+    gpxPoints = next;
+    refreshTrack();
+    updateUndoButtons();
+    log("Redo applied", 'ok');
+}
+function updateUndoButtons() {
+    document.getElementById('undoBtn').disabled = undoStack.length === 0;
+    document.getElementById('redoBtn').disabled = redoStack.length === 0;
 }
 
-// Densify path
+/* ============================
+   Geometry utilities
+   ============================ */
 function densifyPath(points, step=0.00001){
     if (!points || points.length < 2) return points.slice();
     const densified=[];
@@ -115,8 +147,13 @@ function densifyPath(points, step=0.00001){
     densified.push(points[points.length-1]);
     return densified;
 }
-
-// Interpolate along path by fraction (0..1)
+function projectPointOnSegment(p,a,b){
+    const ax=a.lon, ay=a.lat, bx=b.lon, by=b.lat, px=p.lon, py=p.lat;
+    const abx=bx-ax, aby=by-ay;
+    const denom = (abx*abx+aby*aby);
+    const t = denom === 0 ? 0 : Math.max(0,Math.min(1,((px-ax)*abx+(py-ay)*aby)/denom));
+    return { lon: ax + t*abx, lat: ay + t*aby, ele: (a.ele||0) + t*((b.ele||0)-(a.ele||0)), t: t };
+}
 function interpolateAlongPath(path, fraction){
     if (!path || path.length === 0) return null;
     const cumDist = [0];
@@ -127,9 +164,7 @@ function interpolateAlongPath(path, fraction){
     }
     const totalDist = cumDist[cumDist.length-1];
     if (totalDist === 0) return {...path[0]};
-
     const targetDist = fraction * totalDist;
-
     for(let i=1;i<path.length;i++){
         if (cumDist[i-1] <= targetDist && targetDist <= cumDist[i]) {
             const segDist = cumDist[i] - cumDist[i-1];
@@ -143,8 +178,17 @@ function interpolateAlongPath(path, fraction){
     }
     return {...path[path.length-1]};
 }
+function cumulativeDist(path) {
+    const d = [0];
+    for (let i = 1; i < path.length; i++) {
+        const dx = path[i].lon - path[i-1].lon;
+        const dy = path[i].lat - path[i-1].lat;
+        d.push(d[i-1] + Math.sqrt(dx*dx + dy*dy));
+    }
+    return d;
+}
 
-// Draw point markers for visibility
+/* Draw point markers for visibility */
 function drawPointMarkers() {
     pointLayer.clearLayers();
     if (!gpxPoints) return;
@@ -159,7 +203,9 @@ function drawPointMarkers() {
     });
 }
 
-// Load GPX
+/* ============================
+   GPX load / generate
+   ============================ */
 document.getElementById('gpxFile').addEventListener('change', async e => {
     let file = e.target.files[0];
     if (!file) return;
@@ -168,26 +214,63 @@ document.getElementById('gpxFile').addEventListener('change', async e => {
 });
 
 function loadGPX(gpxText){
-    let parser = new DOMParser();
-    let xml = parser.parseFromString(gpxText, "application/xml");
-    let geo = toGeoJSON.gpx(xml);
-    gpxPoints = geo.features[0].geometry.coordinates.map(c => ({ lon:c[0], lat:c[1], ele:c[2]||0 }));
-    referencePath = gpxPoints.map(p => ({...p})); // Deep copy of points
-
-    if(gpxLayer) map.removeLayer(gpxLayer);
-    gpxLayer = L.polyline(gpxPoints.map(p=>[p.lat,p.lon]), {color:'red'}).addTo(map);
-    drawPointMarkers();
-    map.fitBounds(gpxLayer.getBounds());
+    try {
+        let parser = new DOMParser();
+        let xml = parser.parseFromString(gpxText, "application/xml");
+        let geo = toGeoJSON.gpx(xml);
+        if (!geo || !geo.features || geo.features.length === 0) {
+            alert("No GPX track found.");
+            return;
+        }
+        let coords = null;
+        for (let f of geo.features) {
+            if (f.geometry && (f.geometry.type === "LineString" || f.geometry.type === "MultiLineString")) {
+                if (f.geometry.type === "LineString") { coords = f.geometry.coordinates; break; }
+                else if (f.geometry.type === "MultiLineString" && f.geometry.coordinates.length > 0) { coords = f.geometry.coordinates[0]; break; }
+            }
+        }
+        if (!coords) coords = geo.features[0].geometry.coordinates;
+        gpxPoints = coords.map(c => ({ lon:c[0], lat:c[1], ele:c[2]||0 }));
+        referencePath = gpxPoints.map(p => ({...p}));
+        undoStack.length = 0;
+        redoStack.length = 0;
+        updateUndoButtons();
+        if(gpxLayer) map.removeLayer(gpxLayer);
+        gpxLayer = L.polyline(gpxPoints.map(p=>[p.lat,p.lon]), {color:'red', weight:3}).addTo(map);
+        drawPointMarkers();
+        map.fitBounds(gpxLayer.getBounds());
+        log("GPX loaded: " + gpxPoints.length + " points", 'ok');
+    } catch (err) {
+        console.error(err);
+        alert("Failed to parse GPX.");
+        log("GPX parse error: " + err.message, 'err');
+    }
 }
 
-// Draw selection
+function generateGPX(){
+    let gpx=`<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="GPX Snap Tool">\n<trk><trkseg>`;
+    gpxPoints.forEach(p=> gpx+=`\n<trkpt lat="${p.lat}" lon="${p.lon}"><ele>${p.ele||0}</ele></trkpt>`);
+    gpx+=`\n</trkseg></trk></gpx>`;
+    return gpx;
+}
+document.getElementById('downloadBtn').onclick = ()=>{
+    if (!gpxPoints || gpxPoints.length === 0) { alert("No GPX to download."); return; }
+    const blob = new Blob([generateGPX()], {type:'application/gpx+xml'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href=url; a.download='snapped.gpx'; a.click();
+    URL.revokeObjectURL(url);
+    log("GPX generated for download", 'ok');
+};
+
+/* ============================
+   Selection handling
+   ============================ */
 map.on(L.Draw.Event.CREATED, function(event) {
     if (selectionShape) editableLayers.removeLayer(selectionShape);
     selectionShape = event.layer;
     editableLayers.addLayer(selectionShape);
+    log("Selection created", 'ok');
 });
-
-// Check if point is inside selection
 function pointInSelection(p){
     if(!selectionShape) return false;
     if(selectionShape instanceof L.Rectangle){
@@ -208,27 +291,16 @@ function pointInSelection(p){
     return false;
 }
 
-// Project point onto segment
-function projectPointOnSegment(p,a,b){
-    const ax=a.lon, ay=a.lat, bx=b.lon, by=b.lat, px=p.lon, py=p.lat;
-    const abx=bx-ax, aby=by-ay;
-    const denom = (abx*abx+aby*aby);
-    const t = denom === 0 ? 0 : Math.max(0,Math.min(1,((px-ax)*abx+(py-ay)*aby)/denom));
-    return { lon: ax + t*abx, lat: ay + t*aby, ele: (a.ele||0) + t*((b.ele||0)-(a.ele||0)), t: t };
-}
-
-// --- PROGRESSIVE FORWARD-ONLY SNAP (fixes 90° kinks) ---
+/* ============================
+   Progressive forward-only snap (existing)
+   ============================ */
 function snapArea() {
-    if (!selectionShape || gpxPoints.length === 0) return;
+    if (!selectionShape || gpxPoints.length === 0) { alert("Select an area and load GPX."); return; }
 
-    // Get indices of points inside selection (in track order)
     let insideIndices = gpxPoints.map((p,i) => pointInSelection(p) ? i : -1).filter(i => i >= 0);
     if (insideIndices.length < 2) { alert("Select at least 2 points."); return; }
+    insideIndices.sort((a,b) => a-b);
 
-    // Sort by their position along the full GPX (maintain track order)
-    insideIndices.sort((a,b) => a - b);
-
-    // Split into reference (first half) and target (second half)
     const mid = Math.floor(insideIndices.length / 2);
     const refIdx = insideIndices.slice(0, mid);
     const tgtIdx = insideIndices.slice(mid);
@@ -244,10 +316,8 @@ function snapArea() {
     const refPoints = refIdx.map(i => gpxPoints[i]);
     const tgtPoints = tgtIdx.map(i => gpxPoints[i]);
 
-    // Densify reference path for fine-grained snapping
     const densifiedRef = densifyPath(refPoints, 0.00001);
 
-    // Precompute cumulative distance along densified reference
     const refDist = [0];
     for (let i = 1; i < densifiedRef.length; i++) {
         const dx = densifiedRef[i].lon - densifiedRef[i-1].lon;
@@ -256,8 +326,7 @@ function snapArea() {
     }
     const totalRefDist = refDist[refDist.length - 1];
 
-    // Progressive forward-only snapping
-    let lastSegIndex = 0; // never go backwards
+    let lastSegIndex = 0;
     for (let k = 0; k < tgtPoints.length; k++) {
         const p = tgtPoints[k];
         let best = null;
@@ -265,11 +334,10 @@ function snapArea() {
         let bestSeg = lastSegIndex;
         let bestDistToA = 0;
 
-        // Search only forward from lastSegIndex to end
         for (let j = lastSegIndex; j < densifiedRef.length - 1; j++) {
             const a = densifiedRef[j];
             const b = densifiedRef[j+1];
-            const proj = projectPointOnSegment(p, a, b); // returns {lon,lat,ele,t}
+            const proj = projectPointOnSegment(p, a, b);
             const dx = proj.lon - p.lon;
             const dy = proj.lat - p.lat;
             const distSq = dx*dx + dy*dy;
@@ -277,37 +345,34 @@ function snapArea() {
                 bestDistSq = distSq;
                 best = proj;
                 bestSeg = j;
-                // dist from a to projected point along segment
-                const distToA = Math.sqrt((proj.lon - a.lon)**2 + (proj.lat - a.lat)**2);
-                bestDistToA = distToA;
+                bestDistToA = Math.sqrt((proj.lon - a.lon)**2 + (proj.lat - a.lat)**2);
             }
         }
 
         if (best) {
-            // compute fraction along densifiedRef
             const distOnRef = refDist[bestSeg] + bestDistToA;
             const fraction = totalRefDist === 0 ? 0 : (distOnRef / totalRefDist);
             const idxInGPX = tgtIdx[k];
-            // Interpolate exact position on densifiedRef by fraction (keeps perfect alignment)
             const interp = interpolateAlongPath(densifiedRef, fraction);
             if (interp) {
                 gpxPoints[idxInGPX] = interp;
             }
-            // advance lastSegIndex so next point can't snap backward
             lastSegIndex = bestSeg;
         }
     }
 
-    // Redraw polyline + points
     if (gpxLayer) map.removeLayer(gpxLayer);
-    gpxLayer = L.polyline(gpxPoints.map(p => [p.lat, p.lon]), {color:'blue'}).addTo(map);
+    gpxLayer = L.polyline(gpxPoints.map(p => [p.lat, p.lon]), {color:'blue', weight:3}).addTo(map);
     drawPointMarkers();
+    pushHistory();
+    log("Progressive snap applied", 'ok');
 }
 
-// 🟢 UPDATED FUNCTION: Snap to External Path using OSRM Match Service
-// Replaces selected range with dense OSRM geometry and preserves elevation by interpolation
+/* ============================
+   OSRM match-based external snapping (existing)
+   ============================ */
 async function snapToExternalPath() {
-    if (!selectionShape || gpxPoints.length === 0) return;
+    if (!selectionShape || gpxPoints.length === 0) { alert("Select an area and load GPX."); return; }
 
     const indices = gpxPoints
         .map((p, i) => pointInSelection(p) ? i : -1)
@@ -322,10 +387,8 @@ async function snapToExternalPath() {
     const startIndex = indices[0];
     const endIndex   = indices[indices.length - 1];
 
-    // Extract the elevation source segment
     const originalSegment = gpxPoints.slice(startIndex, endIndex + 1);
 
-    // Precompute cumulative distance in the original segment (for elevation interpolation)
     const origDist = [0];
     for (let i = 1; i < originalSegment.length; i++) {
         const dx = originalSegment[i].lon - originalSegment[i-1].lon;
@@ -333,49 +396,35 @@ async function snapToExternalPath() {
         origDist.push(origDist[i - 1] + Math.sqrt(dx*dx + dy*dy));
     }
     const totalOrigDist = origDist[origDist.length - 1] || 0.000001;
-
-    // Function to interpolate elevation based on distance fraction
-    function interpolateElevation(fraction) {
-        if (fraction <= 0) return originalSegment[0].ele;
-        if (fraction >= 1) return originalSegment[originalSegment.length - 1].ele;
-
+    function interpolateElevationFromOriginal(fraction) {
+        if (fraction <= 0) return originalSegment[0].ele || 0;
+        if (fraction >= 1) return originalSegment[originalSegment.length - 1].ele || 0;
         const targetDist = fraction * totalOrigDist;
-
         for (let i = 0; i < origDist.length - 1; i++) {
             if (origDist[i] <= targetDist && origDist[i+1] >= targetDist) {
                 const span = origDist[i+1] - origDist[i] || 1;
                 const localF = (targetDist - origDist[i]) / span;
-                return originalSegment[i].ele + localF * (originalSegment[i+1].ele - originalSegment[i].ele);
+                return (originalSegment[i].ele||0) + localF * ((originalSegment[i+1].ele||0) - (originalSegment[i].ele||0));
             }
         }
-        return originalSegment[originalSegment.length - 1].ele;
+        return originalSegment[originalSegment.length - 1].ele || 0;
     }
 
-    // Build OSRM coordinate string
-    const coordinatesString = indices
-        .map(i => `${gpxPoints[i].lon},${gpxPoints[i].lat}`)
-        .join(';');
-
-    const OSRM_URL =
-        `https://router.project-osrm.org/match/v1/driving/` +
-        `${coordinatesString}?overview=full&geometries=geojson&tidy=true`;
-
+    const coordinatesString = indices.map(i => `${gpxPoints[i].lon},${gpxPoints[i].lat}`).join(';');
+    const OSRM_URL = `https://router.project-osrm.org/match/v1/driving/${coordinatesString}?overview=full&geometries=geojson&tidy=true`;
     document.getElementById('snapPathBtn').disabled = true;
+    log("Calling OSRM match...", null);
 
     try {
-        const response = await fetch(OSRM_URL);
-        const data = await response.json();
-
+        const resp = await fetch(OSRM_URL);
+        const data = await resp.json();
         if (data.code !== "Ok" || !data.matchings || data.matchings.length === 0) {
-            alert("Map matching failed.");
+            alert("Map matching failed or returned no matchings.");
+            log("OSRM match failed.", 'err');
             console.log(data);
             return;
         }
-
-        // Full OSRM geometry (lon, lat)
         const denseGeom = data.matchings[0].geometry.coordinates;
-
-        // Compute cumulative distance along OSRM geometry (to match fraction positions)
         const osrmDist = [0];
         for (let i = 1; i < denseGeom.length; i++) {
             const dx = denseGeom[i][0] - denseGeom[i-1][0];
@@ -384,20 +433,18 @@ async function snapToExternalPath() {
         }
         const totalOsrmDist = osrmDist[osrmDist.length - 1] || 0.000001;
 
-        // Create new points with elevation interpolated from the original GPX section
         let newPoints = denseGeom.map((coord, i) => {
             const fraction = osrmDist[i] / totalOsrmDist;
             return {
                 lon: coord[0],
                 lat: coord[1],
-                ele: interpolateElevation(fraction)
+                ele: interpolateElevationFromOriginal(fraction)
             };
         });
 
-        // Smooth sharp turns further
         newPoints = smoothSharpTurns(newPoints, 20, 3);
 
-        // Replace old segment with new smooth & elevated OSRM geometry
+        pushHistory();
         gpxPoints = [
             ...gpxPoints.slice(0, startIndex),
             ...newPoints,
@@ -405,42 +452,314 @@ async function snapToExternalPath() {
         ];
 
         tgtLayer.clearLayers();
-
         if (gpxLayer) map.removeLayer(gpxLayer);
-        gpxLayer = L.polyline(
-            gpxPoints.map(p => [p.lat, p.lon]),
-            { color: "green" }
-        ).addTo(map);
-
-        // Draw all points for visibility
+        gpxLayer = L.polyline(gpxPoints.map(p => [p.lat, p.lon]), { color: "green", weight:3 }).addTo(map);
         drawPointMarkers();
-
-        console.log("OSRM geometry inserted with elevation preservation:", newPoints.length, "points");
+        log("OSRM match inserted and elevation preserved.", 'ok');
 
     } catch (err) {
         console.error(err);
         alert("Network or OSRM error.");
+        log("OSRM network/error: " + err.message, 'err');
     } finally {
         document.getElementById('snapPathBtn').disabled = false;
     }
 }
 
-document.getElementById('snapBtn').onclick = snapArea;
-document.getElementById('snapPathBtn').onclick = snapToExternalPath; 
+/* ============================
+   Hermite smoothing with endpoint heading preservation
+   ============================ */
 
-// Download GPX
-function generateGPX(){
-    let gpx=`<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="GPX Snap Tool">\n<trk><trkseg>`;
-    gpxPoints.forEach(p=> gpx+=`\n<trkpt lat="${p.lat}" lon="${p.lon}"><ele>${p.ele}</ele></trkpt>`);
-    gpx+=`\n</trkseg></trk></gpx>`;
-    return gpx;
+// compute tangents; if preserveHeading is true, endpoints get one-sided tangent that preserves heading
+function computeTangentsWithHeading(section, tension = 0.5, preserveHeading = true) {
+    const n = section.length;
+    const tangents = new Array(n);
+    for (let i = 0; i < n; i++) {
+        if (i === 0) {
+            if (preserveHeading && n > 1) {
+                // tangent based on first -> second delta (preserve initial heading)
+                tangents[i] = {
+                    lat: (section[1].lat - section[0].lat) * tension,
+                    lon: (section[1].lon - section[0].lon) * tension,
+                    ele: (section[1].ele - section[0].ele) * tension
+                };
+            } else {
+                const p0 = section[0], p1 = section[Math.min(n-1,1)];
+                tangents[i] = { lat: (p1.lat - p0.lat) * tension, lon: (p1.lon - p0.lon) * tension, ele: (p1.ele - p0.ele) * tension };
+            }
+        } else if (i === n-1) {
+            if (preserveHeading && n > 1) {
+                // tangent based on last-1 -> last delta (preserve end heading)
+                tangents[i] = {
+                    lat: (section[n-1].lat - section[n-2].lat) * tension,
+                    lon: (section[n-1].lon - section[n-2].lon) * tension,
+                    ele: (section[n-1].ele - section[n-2].ele) * tension
+                };
+            } else {
+                const p0 = section[Math.max(0,n-2)], p1 = section[n-1];
+                tangents[i] = { lat: (p1.lat - p0.lat) * tension, lon: (p1.lon - p0.lon) * tension, ele: (p1.ele - p0.ele) * tension };
+            }
+        } else {
+            // central difference for interior points
+            const pPrev = section[i-1], pNext = section[i+1];
+            tangents[i] = { lat: (pNext.lat - pPrev.lat) * tension / 2, lon: (pNext.lon - pPrev.lon) * tension / 2, ele: (pNext.ele - pPrev.ele) * tension / 2 };
+        }
+    }
+    return tangents;
 }
 
-document.getElementById('downloadBtn').onclick = ()=>{
-    const blob = new Blob([generateGPX()], {type:'application/gpx+xml'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href=url; a.download='snapped.gpx'; a.click();
-};
+function hermiteInterpolate(p0, p1, t0, t1, t) {
+    const tt = t * t, ttt = tt * t;
+    const h00 = 2*ttt - 3*tt + 1;
+    const h10 = ttt - 2*tt + t;
+    const h01 = -2*ttt + 3*tt;
+    const h11 = ttt - tt;
+    return {
+        lat: h00 * p0.lat + h10 * t0.lat + h01 * p1.lat + h11 * t1.lat,
+        lon: h00 * p0.lon + h10 * t0.lon + h01 * p1.lon + h11 * t1.lon
+    };
+}
+
+function createHermiteLatLon(section, resolution = 20, tension = 0.6, preserveHeading = true) {
+    if (section.length < 2) return section.slice();
+    const tangents = computeTangentsWithHeading(section, tension, preserveHeading);
+    const smooth = [];
+    for (let i = 0; i < section.length - 1; i++) {
+        const p0 = section[i], p1 = section[i+1], t0 = tangents[i], t1 = tangents[i+1];
+        for (let j = 0; j < resolution; j++) {
+            const t = j / resolution;
+            smooth.push(hermiteInterpolate(p0, p1, t0, t1, t));
+        }
+    }
+    smooth.push({ lat: section[section.length-1].lat, lon: section[section.length-1].lon });
+    return smooth;
+}
+
+/* Remove near-duplicate points */
+function cleanPoints(points) {
+    if (!points || points.length === 0) return points.slice();
+    const cleaned = [points[0]];
+    for (let i=1;i<points.length;i++){
+        const a = cleaned[cleaned.length-1], b = points[i];
+        const dx = a.lon - b.lon, dy = a.lat - b.lat;
+        if ((dx*dx + dy*dy) > 1e-12) cleaned.push(b);
+    }
+    return cleaned;
+}
+
+/* Main: prepare preview (temporary overlay) */
+function prepareSmoothPreview() {
+    previewLayer.clearLayers();
+    if (!selectionShape || gpxPoints.length === 0) return;
+
+    const indices = gpxPoints
+        .map((p,i) => pointInSelection(p) ? i : -1)
+        .filter(i => i >= 0);
+
+    if (indices.length < 3) {
+        // nothing to preview
+        return;
+    }
+
+    indices.sort((a,b) => a-b);
+    const start = indices[0], end = indices[indices.length - 1];
+    const originalSegment = gpxPoints.slice(start, end + 1);
+
+    const tension = parseFloat(document.getElementById('tension').value);
+    const resolution = parseInt(document.getElementById('resolution').value, 10);
+    const preserveHeading = document.getElementById('preserveHeading').checked;
+
+    // compute elevation interpolation helpers
+    const origDist = [0];
+    for (let i=1;i<originalSegment.length;i++){
+        const dx = originalSegment[i].lon - originalSegment[i-1].lon;
+        const dy = originalSegment[i].lat - originalSegment[i-1].lat;
+        origDist.push(origDist[i-1] + Math.sqrt(dx*dx + dy*dy));
+    }
+    const totalOrigDist = origDist[origDist.length-1] || 0.000001;
+    function interpElev(frac) {
+        if (frac <= 0) return originalSegment[0].ele || 0;
+        if (frac >= 1) return originalSegment[originalSegment.length-1].ele || 0;
+        const target = frac * totalOrigDist;
+        for (let i=0;i<origDist.length-1;i++){
+            if (origDist[i] <= target && origDist[i+1] >= target) {
+                const span = origDist[i+1]-origDist[i] || 1;
+                const lf = (target - origDist[i]) / span;
+                return (originalSegment[i].ele||0) + lf * ((originalSegment[i+1].ele||0)-(originalSegment[i].ele||0));
+            }
+        }
+        return originalSegment[originalSegment.length-1].ele || 0;
+    }
+
+    // compute smooth lat/lon
+    const smoothLatLon = createHermiteLatLon(originalSegment, resolution, tension, preserveHeading);
+    const smoothDist = cumulativeDist(smoothLatLon);
+    const totSmooth = smoothDist[smoothDist.length-1] || 0.000001;
+
+    const newPoints = smoothLatLon.map((pt,i) => ({
+        lat: pt.lat,
+        lon: pt.lon,
+        ele: interpElev(smoothDist[i] / totSmooth)
+    }));
+    const cleaned = cleanPoints(newPoints);
+
+    // draw preview polyline (dashed blue)
+    L.polyline(cleaned.map(p=>[p.lat,p.lon]), {color:'dodgerblue', weight:3, dashArray:'8,8'}).addTo(previewLayer);
+}
+
+/* When sliders change, update preview if livePreview is enabled */
+document.getElementById('tension').addEventListener('input', (e)=>{
+    document.getElementById('tensionVal').textContent = parseFloat(e.target.value).toFixed(2);
+    if (document.getElementById('livePreview').checked) prepareSmoothPreview();
+});
+document.getElementById('resolution').addEventListener('input', (e)=>{
+    document.getElementById('resolutionVal').textContent = e.target.value;
+    if (document.getElementById('livePreview').checked) prepareSmoothPreview();
+});
+document.getElementById('preserveHeading').addEventListener('change', ()=>{
+    if (document.getElementById('livePreview').checked) prepareSmoothPreview();
+});
+document.getElementById('livePreview').addEventListener('change', (e)=>{
+    if (e.target.checked) prepareSmoothPreview();
+    else previewLayer.clearLayers();
+});
+
+/* Apply smoothing permanently (stores history) */
+function applySmoothTurn() {
+    if (!selectionShape || gpxPoints.length === 0) { alert("Select an area and load GPX."); return; }
+    const indices = gpxPoints.map((p,i) => pointInSelection(p) ? i : -1).filter(i => i >= 0);
+    if (indices.length < 3) { alert("Select a full turn (≥3 points)."); return; }
+    indices.sort((a,b)=>a-b);
+    const start = indices[0], end = indices[indices.length - 1];
+    const originalSegment = gpxPoints.slice(start, end + 1);
+
+    const tension = parseFloat(document.getElementById('tension').value);
+    const resolution = parseInt(document.getElementById('resolution').value, 10);
+    const preserveHeading = document.getElementById('preserveHeading').checked;
+
+    // elevation helper
+    const origDist = [0];
+    for (let i=1;i<originalSegment.length;i++){
+        const dx = originalSegment[i].lon - originalSegment[i-1].lon;
+        const dy = originalSegment[i].lat - originalSegment[i-1].lat;
+        origDist.push(origDist[i-1] + Math.sqrt(dx*dx + dy*dy));
+    }
+    const totalOrigDist = origDist[origDist.length-1] || 0.000001;
+    function interpElev(frac) {
+        if (frac <= 0) return originalSegment[0].ele || 0;
+        if (frac >= 1) return originalSegment[originalSegment.length-1].ele || 0;
+        const target = frac * totalOrigDist;
+        for (let i=0;i<origDist.length-1;i++){
+            if (origDist[i] <= target && origDist[i+1] >= target) {
+                const span = origDist[i+1]-origDist[i] || 1;
+                const lf = (target - origDist[i]) / span;
+                return (originalSegment[i].ele||0) + lf * ((originalSegment[i+1].ele||0)-(originalSegment[i].ele||0));
+            }
+        }
+        return originalSegment[originalSegment.length-1].ele || 0;
+    }
+
+    const smoothLatLon = createHermiteLatLon(originalSegment, resolution, tension, preserveHeading);
+    const smoothDist = cumulativeDist(smoothLatLon);
+    const totSmooth = smoothDist[smoothDist.length-1] || 0.000001;
+    const newPoints = smoothLatLon.map((pt,i) => ({
+        lat: pt.lat,
+        lon: pt.lon,
+        ele: interpElev(smoothDist[i] / totSmooth)
+    }));
+    const cleaned = cleanPoints(newPoints);
+
+    pushHistory(); // save current state for undo
+    gpxPoints = [
+        ...gpxPoints.slice(0, start),
+        ...cleaned,
+        ...gpxPoints.slice(end + 1)
+    ];
+    // redraw
+    previewLayer.clearLayers();
+    if (gpxLayer) map.removeLayer(gpxLayer);
+    gpxLayer = L.polyline(gpxPoints.map(p=>[p.lat,p.lon]), {color:'purple', weight:3}).addTo(map);
+    drawPointMarkers();
+    log(`Smooth applied. Replaced ${originalSegment.length} points with ${cleaned.length}.`, 'ok');
+}
+
+/* ============================
+   Sharp-turn extra points (keeps for OSRM smoothing fallback)
+   ============================ */
+function smoothSharpTurns(points, angleThresholdDeg = 20, extraPoints = 3) {
+    function angle(a, b, c) {
+        const abx = b.lon - a.lon, aby = b.lat - a.lat;
+        const cbx = b.lon - c.lon, cby = b.lat - c.lat;
+        const dot = abx * cbx + aby * cby;
+        const mag1 = Math.sqrt(abx*abx + aby*aby);
+        const mag2 = Math.sqrt(cbx*cbx + cby*cby);
+        if (mag1 === 0 || mag2 === 0) return 180;
+        const cosv = Math.max(-1, Math.min(1, dot / (mag1 * mag2)));
+        return Math.acos(cosv) * (180 / Math.PI);
+    }
+    if (!points || points.length < 3) return points.slice();
+    const result = [points[0]];
+    for (let i = 1; i < points.length - 1; i++) {
+        const a = points[i - 1];
+        const b = points[i];
+        const c = points[i + 1];
+        const ang = angle(a, b, c);
+        if (ang < angleThresholdDeg) {
+            for (let j = 1; j <= extraPoints; j++) {
+                const t = j / (extraPoints + 1);
+                result.push({
+                    lat: b.lat * (1 - t) + c.lat * t,
+                    lon: b.lon * (1 - t) + c.lon * t,
+                    ele:  b.ele * (1 - t) + c.ele * t
+                });
+            }
+        }
+        result.push(b);
+    }
+    result.push(points[points.length - 1]);
+    return result;
+}
+
+/* ============================
+   Helpers: refresh track
+   ============================ */
+function refreshTrack() {
+    previewLayer.clearLayers();
+    if (gpxLayer) map.removeLayer(gpxLayer);
+    gpxLayer = L.polyline(gpxPoints.map(p=>[p.lat,p.lon]), {color:'red', weight:3}).addTo(map);
+    drawPointMarkers();
+}
+
+/* ============================
+   Wire up UI
+   ============================ */
+document.getElementById('snapBtn').onclick = snapArea;
+document.getElementById('snapPathBtn').onclick = snapToExternalPath;
+document.getElementById('smoothBtn').onclick = applySmoothTurn;
+document.getElementById('undoBtn').onclick = undo;
+document.getElementById('redoBtn').onclick = redo;
+
+document.getElementById('tension').dispatchEvent(new Event('input'));
+document.getElementById('resolution').dispatchEvent(new Event('input'));
+updateUndoButtons();
+log("Ready. Load a GPX, draw a selection, tune sliders (live preview), then click 'Apply Smooth Turn'. Undo/Redo available.", 'ok');
+
+/* Live preview trigger: update when selection changes or when livePreview toggled or when sliders change */
+map.on('draw:edited', ()=> { if (document.getElementById('livePreview').checked) prepareSmoothPreview(); });
+map.on('draw:deleted', ()=> { selectionShape = null; previewLayer.clearLayers(); });
+
+/* Also update preview when user creates a selection */
+map.on(L.Draw.Event.CREATED, function(event) {
+    if (selectionShape) editableLayers.removeLayer(selectionShape);
+    selectionShape = event.layer;
+    editableLayers.addLayer(selectionShape);
+    log("Selection created", 'ok');
+    if (document.getElementById('livePreview').checked) prepareSmoothPreview();
+});
+
+// Also re-preview when map clicked (small UX improvement)
+map.on('click', ()=> { if (document.getElementById('livePreview').checked) prepareSmoothPreview(); });
+
 </script>
 </body>
 </html>
