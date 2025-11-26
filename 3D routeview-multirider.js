@@ -1,0 +1,352 @@
+// ==UserScript==
+// @name         Biketerra 3D Route Viewer + Multi Rider
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  3D route viewer with elevation + live rider markers
+// @author       Josef/chatgpt
+// @match        https://biketerra.com/ride*
+// @match        https://biketerra.com/spectate/*
+// @exclude      https://biketerra.com/dashboard
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=biketerra.com
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // ---------- Fetch Interception ----------
+    let interceptedRouteJson = null;
+    const originalFetch = window.fetch;
+    window.fetch = async function(resource, options) {
+        let url = (resource instanceof Request) ? resource.url : resource;
+        if (url && url.includes("/__data.json")) {
+            const response = await originalFetch(resource, options);
+            const clone = response.clone();
+            try { interceptedRouteJson = await clone.json(); console.log("[3D Viewer] Intercepted JSON via fetch"); }
+            catch(e){ console.error("[3D Viewer] Parse error:", e); }
+            return response;
+        }
+        return originalFetch(resource, options);
+    };
+
+    // ---------- Wait Helpers ----------
+    function waitFor(selector, timeout=10000) {
+        return new Promise((resolve, reject)=>{
+            const t = setTimeout(()=>reject("Timeout "+selector), timeout);
+            const check = ()=>{
+                const el = document.querySelector(selector);
+                if(el){ clearTimeout(t); resolve(el); } else requestAnimationFrame(check);
+            };
+            check();
+        });
+    }
+
+    async function waitForIntercept(timeout=3000){
+        const start = performance.now();
+        while(!interceptedRouteJson){
+            if(performance.now()-start>timeout) return false;
+            await new Promise(r=>setTimeout(r,10));
+        }
+        return true;
+    }
+
+    waitFor(".elev-cursor").then(()=>{ start3DViewer(); }).catch(console.error);
+
+    // ---------- Start 3D Viewer ----------
+    async function start3DViewer() {
+        if(typeof window.BABYLON === 'undefined'){
+            await new Promise((resolve, reject)=>{
+                const s = document.createElement('script');
+                s.src='https://cdn.babylonjs.com/babylon.js';
+                s.onload=resolve; s.onerror=reject;
+                document.head.appendChild(s);
+            });
+        }
+        const BABYLON = window.BABYLON;
+
+        // --- Determine JSON URL ---
+        let url;
+        const params = new URLSearchParams(window.location.search);
+        if(window.location.pathname.startsWith("/spectate/")){
+            const spectateId = window.location.pathname.split("/")[2];
+            url = `https://biketerra.com/spectate/${spectateId}/__data.json`;
+        } else if(window.location.pathname.startsWith("/ride")){
+            const eventId = params.get("event");
+            if(eventId) url = `https://biketerra.com/ride/__data.json?event=${eventId}`;
+            else { const routeId = params.get("route"); if(!routeId) return console.error("No route ID"); url=`https://biketerra.com/ride/__data.json?route=${routeId}`; }
+        } else return console.error("Unknown page type");
+
+        await waitForIntercept();
+        let j = interceptedRouteJson || window.__remixContext?.state?.loaderData || null;
+        if(!j) { const resp=await fetch(url); j = await resp.json(); }
+        if(!j) return console.error("Cannot get route JSON");
+
+        // --- Extract route points ---
+        function findRoutes(obj,routes=[]){
+            if(!obj) return routes;
+            if(Array.isArray(obj)){
+                if(obj.length>0 && Array.isArray(obj[0]) && typeof obj[0][0]==="number"){ routes.push(obj); }
+                else obj.forEach(el=>findRoutes(el,routes));
+            } else if(typeof obj==="string"){ try{ findRoutes(JSON.parse(obj),routes); } catch{} }
+            else if(typeof obj==="object") Object.values(obj).forEach(v=>findRoutes(v,routes));
+            return routes;
+        }
+        const routes = findRoutes(j);
+        if(!routes.length) return console.warn("No route array found");
+        const raw = routes[0];
+
+        // --- Convert to scene coordinates ---
+        const lat0 = raw[0][0]*Math.PI/180;
+        const lon0 = raw[0][1]*Math.PI/180;
+        const R = 6371000;
+
+        const xVals = raw.map(p=>((p[1]*Math.PI/180 - lon0)*R*Math.cos(lat0)));
+        const zVals = raw.map(p=>((p[0]*Math.PI/180 - lat0)*R));
+        const yVals = raw.map(p=>p[2]);
+
+        const xMin=Math.min(...xVals), xMax=Math.max(...xVals);
+        const zMin=Math.min(...zVals), zMax=Math.max(...zVals);
+        const maxXZ=Math.max(xMax-xMin,zMax-zMin)||1;
+
+        // --- Scene scale based on route length ---
+        const distKm = Math.hypot(xMax-xMin,zMax-zMin)/1000;
+        let sceneScale=20;
+        if(distKm>30) sceneScale=50;
+        if(distKm>60) sceneScale=80;
+        if(distKm>120) sceneScale=150;
+        console.log(`[3D Viewer] Scene scale applied: ${sceneScale}`);
+        let yExag = 0.01;
+
+        const points = raw.map((p,i)=>new BABYLON.Vector3(
+            (xVals[i]-(xMin+xMax)/2)/maxXZ*sceneScale,
+            (yVals[i]-Math.min(...yVals))*yExag,
+            (zVals[i]-(zMin+zMax)/2)/maxXZ*sceneScale
+        ));
+
+        // --- Cumulative distances ---
+        const cum = new Array(points.length).fill(0);
+        for(let i=1;i<points.length;i++){
+            const dx=points[i].x-points[i-1].x;
+            const dz=points[i].z-points[i-1].z;
+            cum[i]=cum[i-1]+Math.hypot(dx,dz);
+        }
+        const totalDist = cum[cum.length-1]||1;
+        console.log(`[3D Viewer] Scene total distance: ${totalDist.toFixed(2)} units`);
+
+        // --- Get real-world route length from page/fallback ---
+let distanceKm = null;
+const routeMain = document.querySelector(".route-main");
+if (!routeMain) return console.warn("[3D Viewer] Cannot find .route-main");
+
+const infoDiv = Array.from(routeMain.querySelectorAll("div"))
+    .find(d => d && /km/i.test(d.textContent) && /\//.test(d.textContent));
+if (!infoDiv) return console.warn("[3D Viewer] Cannot find info div with km / m");
+
+const text = infoDiv.textContent.replace(/\s+/g, " ").trim(); // e.g. "17.5 km / 403 m"
+const match = text.match(/([\d.,]+)\s*km\s*\/\s*([\d.,]+)\s*m/i);
+if (!match) return console.warn("[3D Viewer] Cannot parse km / m from info div");
+
+distanceKm = parseFloat(match[1].replace(",", "."));
+const climbM = parseFloat(match[2].replace(",", "."));
+if (!Number.isFinite(distanceKm) || !Number.isFinite(climbM)) return console.warn("[3D Viewer] Invalid distance or climb");
+
+console.log(`[3D Viewer] Route length: ${distanceKm} km, climb: ${climbM} m`);
+// --- Real meters <-> scene units conversion ---
+let metersPerSceneUnit = 1;
+if (distanceKm !== null) {
+    metersPerSceneUnit = (distanceKm * 1000) / totalDist;
+    console.log(`[3D Viewer] metersPerSceneUnit = ${metersPerSceneUnit.toFixed(4)} m/unit`);
+}
+
+
+        // --- Create Canvas + Scene ---
+        const canvas=document.createElement("canvas");
+        canvas.width=600; canvas.height=350;
+        Object.assign(canvas.style,{position:"fixed",top:"8px",left:"8px",zIndex:"1",background:"transparent",borderRadius:"8px"});
+        document.body.appendChild(canvas);
+        const engine = new BABYLON.Engine(canvas,true,{preserveDrawingBuffer:true,stencil:true,premultipliedAlpha:false});
+        const scene = new BABYLON.Scene(engine);
+        scene.clearColor = new BABYLON.Color4(0,0,0,0.5);
+        const radius=Math.max(...points.map(p=>p.length()))*2;
+        const camera = new BABYLON.ArcRotateCamera("cam",Math.PI/2,Math.PI/3,radius,BABYLON.Vector3.Zero(),scene);
+        camera.attachControl(canvas,true);
+        camera.minZ=0.1; camera.lowerRadiusLimit=0.5; camera.upperRadiusLimit=radius*5; camera.wheelDeltaPercentage=0.05;
+        new BABYLON.HemisphericLight("light",new BABYLON.Vector3(0,1,0),scene);
+
+        // --- Grade Colors Helper ---
+        const GRADE_COLORS=[{grade:0,color:"#0008"},{grade:1,color:"#FF6262"},{grade:4,color:"#DC5666"},{grade:8,color:"#B14674"},{grade:11,color:"#7F347C"}];
+        function hexToC4(hex){ const n=parseInt(hex.slice(1),16); return new BABYLON.Color4((n>>16&255)/255,(n>>8&255)/255,(n&255)/255,1); }
+        function getGradeColor(g){ for(let i=GRADE_COLORS.length-1;i>=0;i--){ if(g>=GRADE_COLORS[i].grade) return hexToC4(GRADE_COLORS[i].color); } return hexToC4(GRADE_COLORS[0].color); }
+
+        // --- Flat Fill Mesh ---
+        const bottomY = Math.min(...points.map(p=>p.y));
+        const grades=[];
+        for(let i=0;i<points.length-1;i++){
+            const dy=points[i+1].y-points[i].y;
+            const dxz=points[i+1].subtract(points[i]).length();
+            grades.push(dxz===0?0:(dy/dxz)*100);
+        }
+        grades.push(grades[grades.length-1]);
+        const segmentColors = grades.map(g=>getGradeColor(g));
+
+        const positions=[],colorsArray=[],indices=[];
+        let baseIndex=0;
+        for(let i=0;i<points.length-1;i++){
+            const p0=points[i],p1=points[i+1];
+            const c0=segmentColors[i],c1=segmentColors[i+1];
+            const t0=[p0.x,p0.y,p0.z], t1=[p1.x,p1.y,p1.z];
+            const b0=[p0.x,bottomY,p0.z], b1=[p1.x,bottomY,p1.z];
+            positions.push(...t0,...t1,...b0,...b1);
+            const c0a=[c0.r,c0.g,c0.b,1];
+            colorsArray.push(...c0a,...c0a,...c0a,...c0a);
+            indices.push(baseIndex,baseIndex+1,baseIndex+2,baseIndex+1,baseIndex+3,baseIndex+2);
+            baseIndex+=4;
+        }
+        const fill = new BABYLON.Mesh("flatFill",scene);
+        fill.setVerticesData(BABYLON.VertexBuffer.PositionKind,positions);
+        fill.setVerticesData(BABYLON.VertexBuffer.ColorKind,colorsArray);
+        fill.setIndices(indices);
+        const fillMat = new BABYLON.StandardMaterial("fillMat",scene);
+        fillMat.emissiveColor = new BABYLON.Color3(1,1,1);
+        fillMat.vertexColorMode = BABYLON.Constants.VERTEXCOLOR_USE_COLORS;
+        fillMat.backFaceCulling = false;
+        fillMat.alpha = 1;
+        fill.material=fillMat;
+
+        // --- Route Line ---
+        const line = BABYLON.MeshBuilder.CreateLines("routeLine",{points:points,colors:points.map(()=>new BABYLON.Color4(0.75,0.75,0.75,1))},scene);
+
+        // --- Marker Arrow ---
+        const marker = BABYLON.MeshBuilder.CreateSphere("marker",{diameter:0.001},scene); marker.isVisible=false;
+        const arrow = BABYLON.MeshBuilder.CreateCylinder("arrow",{height:0.6,diameterTop:0,diameterBottom:0.25,tessellation:12},scene);
+        arrow.rotation.x=Math.PI; arrow.position.y=bottomY+0.6*1.2;
+        const arrowMat = new BABYLON.StandardMaterial("arrowMat",scene);
+        arrowMat.emissiveColor=new BABYLON.Color3(0.95,0.3,0.2); arrow.material=arrowMat; arrow.alwaysSelectAsActiveMesh=true;
+
+        const cursorEl = document.querySelector(".elev-cursor");
+
+        function findSegmentIndexByDist(d){
+            if(d<=0) return 0;
+            if(d>=totalDist) return cum.length-2;
+            let lo=0,hi=cum.length-1;
+            while(lo<=hi){
+                const mid=(lo+hi)>>1;
+                if(cum[mid]<=d && d<=cum[mid+1]) return mid;
+                if(cum[mid]<d) lo=mid+1;
+                else hi=mid-1;
+            }
+            return Math.max(0,Math.min(cum.length-2,lo-1));
+        }
+
+        function updateMarkerFromCursor(){
+            if(!cursorEl) return;
+            const m = cursorEl.style.left.match(/([\d.]+)%/); if(!m) return;
+            const pct = parseFloat(m[1])/100; if(!isFinite(pct)) return;
+            const targetDist = pct*totalDist;
+            const i = findSegmentIndexByDist(targetDist);
+            const segStart=cum[i], segEnd=cum[i+1], segLen=segEnd-segStart||1;
+            const localT=(targetDist-segStart)/segLen;
+            const p0=points[i], p1=points[i+1];
+            const pos=p0.add(p1.subtract(p0).scale(localT));
+            marker.position.copyFrom(pos);
+            arrow.position.set(pos.x,pos.y+0.35,pos.z);
+        }
+
+        // --- Rider markers ---
+        let riderMeshes = new Map();
+// --- LeaderOverlay logic: get real rider positions ---
+function getRiderPositions(){
+    const results=[];
+    const cursor=document.querySelector('.elev-cursor');
+    let myPercent=0;
+    if(cursor){
+        const m = cursor.style.left.match(/([\d.]+)%/);
+        if(m) myPercent=parseFloat(m[1]);
+    }
+    const myKm = myPercent/100 * distanceKm;
+
+    const ridersMain=document.querySelector(".riders-main");
+    if(!ridersMain) return [];
+    const ridersEls=ridersMain.querySelectorAll(".rider");
+
+    ridersEls.forEach(r=>{
+        let name=r.querySelector(".rider-name")?.textContent.trim()||"Unknown";
+        if(name.toLowerCase().includes("you")) return; // skip yourself
+
+        let distEl=r.querySelector(".rider-distance .monospace");
+        let offsetKm = 0;
+        if(distEl){
+            const text=distEl.textContent.trim();
+            const match=text.match(/([+-]?[\d.,]+)\s*(km|m|meter|meters)?/i);
+            if(match){
+                offsetKm = parseFloat(match[1].replace(",", "."));
+                const unit = match[2] ? match[2].toLowerCase() : "km";
+                if(unit.includes("meters")) offsetKm /= 1000;
+            }
+        }
+
+        // Compute absolute position along route
+        let riderKm = myKm + offsetKm;
+        // Wrap around if negative or exceeds route
+        riderKm = ((riderKm % distanceKm) + distanceKm) % distanceKm;
+        const percent = (riderKm / distanceKm) * 100;
+
+        results.push({name, percent, isLeader:false, isYou:false, offsetKm, riderKm});
+    });
+
+    return results;
+}
+
+// --- Update rider markers ---
+// --- Update rider markers ---
+function updateRidersMarkers() {
+    const riders = getRiderPositions();
+    const existingNames = new Set(riders.map(r => r.name));
+
+    // Remove meshes for riders no longer present
+    for (let [name, mesh] of riderMeshes) {
+        if (!existingNames.has(name)) {
+            mesh.dispose();
+            riderMeshes.delete(name);
+        }
+    }
+
+    // Add/update current riders
+    riders.forEach(r => {
+        let mesh = riderMeshes.get(r.name);
+        if (!mesh) {
+            mesh = BABYLON.MeshBuilder.CreateSphere(r.name, { diameter: 0.1 }, scene);
+            const mat = new BABYLON.StandardMaterial(r.name + "Mat", scene);
+            mat.emissiveColor = r.isLeader ? new BABYLON.Color3(1, 1, 1) : new BABYLON.Color3(1, 1, 1);
+            mesh.material = mat;
+            riderMeshes.set(r.name, mesh);
+        }
+
+        // Use riderKm to compute position
+        const targetDistMeters = r.riderKm * 1000;
+        const targetDist = targetDistMeters / metersPerSceneUnit;
+
+        let i = 0;
+        while (i < cum.length - 1 && !(cum[i] <= targetDist && targetDist <= cum[i + 1])) i++;
+        const segStart = cum[i], segEnd = cum[i + 1];
+        const localT = (targetDist - segStart) / (segEnd - segStart || 1);
+        const pos = points[i].add(points[i + 1].subtract(points[i]).scale(localT));
+        mesh.position.copyFrom(pos);
+
+//console.log(`[3D Viewer] Rider ${r.name}: offsetKm=${r.offsetKm}, distKm=${r.riderKm.toFixed(2)}, percent=${r.percent.toFixed(2)}%, segmentIndex=${i}`);
+    });
+}
+
+
+        // --- Render Loop ---
+        engine.runRenderLoop(()=>{
+            updateMarkerFromCursor();
+            updateRidersMarkers();
+            camera.setTarget(marker.position);
+            scene.render();
+        });
+
+        window.addEventListener("resize",()=>engine.resize());
+    }
+
+})();
