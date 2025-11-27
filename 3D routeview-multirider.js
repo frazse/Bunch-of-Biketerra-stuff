@@ -326,51 +326,63 @@ if (routeDirection === -1) {
 
         // --- Rider markers ---
         let riderMeshes = new Map();
-// --- LeaderOverlay logic: get real rider positions ---
-function getRiderPositions(){
-    const results=[];
-    const cursor=document.querySelector('.elev-cursor');
-    let myPercent=0;
-    if(cursor){
-        const m = cursor.style.left.match(/([\d.]+)%/);
-        if(m) myPercent=parseFloat(m[1]);
+// --- Get all riders relative to "you" (your current position) ---
+function getRiderPositions() {
+    const results = [];
+    const cursorEl = document.querySelector('.elev-cursor');
+    let myPercent = 0;
+    if (cursorEl) {
+        const m = cursorEl.style.left.match(/([\d.]+)%/);
+        if (m) myPercent = parseFloat(m[1]);
     }
-    const myKm = myPercent/100 * distanceKm;
+    const myKm = (myPercent / 100) * distanceKm;
 
-    const ridersMain=document.querySelector(".riders-main");
-    if(!ridersMain) return [];
-    const ridersEls=ridersMain.querySelectorAll(".rider");
+    const ridersEls = document.querySelectorAll(".riders-main .rider");
+    if (!ridersEls.length) return results;
 
-    ridersEls.forEach(r=>{
-        let name=r.querySelector(".rider-name")?.textContent.trim()||"Unknown";
-        if(name.toLowerCase().includes("you")) return; // skip yourself
+    ridersEls.forEach(r => {
+        let name = r.querySelector(".rider-name")?.textContent.trim() || "Unknown";
+        if (name.toLowerCase().includes("you")) return; // skip yourself
 
-        let distEl=r.querySelector(".rider-distance .monospace");
+        let distEl = r.querySelector(".rider-distance .monospace");
         let offsetKm = 0;
-        if(distEl){
-            const text=distEl.textContent.trim();
-            const match=text.match(/([+-]?[\d.,]+)\s*(km|m|meter|meters)?/i);
-            if(match){
-                offsetKm = parseFloat(match[1].replace(",", "."));
-                const unit = match[2] ? match[2].toLowerCase() : "km";
-                if(unit.includes("meters")) offsetKm /= 1000;
-            }
-        }
 
-        // Compute absolute position along route
+if (distEl) {
+    // Grab full text including units outside the span
+    const text = distEl.parentElement.textContent.trim(); // e.g. "+7 meters"
+    const match = text.match(/([+-]?[\d.,]+)\s*(km|k?m|m|meter|meters)?/i);
+    if (match) {
+        offsetKm = parseFloat(match[1].replace(",", "."));
+        const unit = match[2] ? match[2].toLowerCase() : "km";
+
+        // Convert meters → km
+        if (unit === "m" || unit === "meter" || unit === "meters") {
+            offsetKm /= 1000;
+        }
+    }
+}
+
+        // Absolute rider position along route in km
         let riderKm = myKm + offsetKm;
         // Wrap around if negative or exceeds route
         riderKm = ((riderKm % distanceKm) + distanceKm) % distanceKm;
         const percent = (riderKm / distanceKm) * 100;
 
-        results.push({name, percent, isLeader:false, isYou:false, offsetKm, riderKm});
+        results.push({ name, offsetKm, riderKm, percent });
+    });
+
+    // Debug log all riders
+    console.log("[3D Viewer] Rider positions:");
+    results.forEach(r => {
+        console.log(
+            `${r.name}: offsetKm=${r.offsetKm.toFixed(3)} km, riderKm=${r.riderKm.toFixed(3)} km, percent=${r.percent.toFixed(2)}%`
+        );
     });
 
     return results;
 }
 
-// --- Update rider markers ---
-// --- Update rider markers ---
+// --- Update rider meshes in the scene ---
 function updateRidersMarkers() {
     const riders = getRiderPositions();
     const existingNames = new Set(riders.map(r => r.name));
@@ -389,27 +401,21 @@ function updateRidersMarkers() {
         if (!mesh) {
             mesh = BABYLON.MeshBuilder.CreateSphere(r.name, { diameter: 0.1 }, scene);
             const mat = new BABYLON.StandardMaterial(r.name + "Mat", scene);
-            mat.emissiveColor = r.isLeader ? new BABYLON.Color3(1, 1, 1) : new BABYLON.Color3(1, 1, 1);
+            mat.emissiveColor = new BABYLON.Color3(1, 1, 1); // white for now
             mesh.material = mat;
             riderMeshes.set(r.name, mesh);
         }
 
-        // Use riderKm to compute position
-        const targetDistMeters = r.riderKm * 1000;
-let targetDist = targetDistMeters / metersPerSceneUnit;
+        // Convert riderKm → scene units
+        const targetDist = (r.riderKm / distanceKm) * totalDist * (routeDirection === -1 ? -1 : 1) + (routeDirection === -1 ? totalDist : 0);
 
-if (routeDirection === -1) {
-    targetDist = totalDist - targetDist;
-}
-
+        // Find segment index
         let i = 0;
         while (i < cum.length - 1 && !(cum[i] <= targetDist && targetDist <= cum[i + 1])) i++;
         const segStart = cum[i], segEnd = cum[i + 1];
         const localT = (targetDist - segStart) / (segEnd - segStart || 1);
         const pos = points[i].add(points[i + 1].subtract(points[i]).scale(localT));
         mesh.position.copyFrom(pos);
-
-//console.log(`[3D Viewer] Rider ${r.name}: offsetKm=${r.offsetKm}, distKm=${r.riderKm.toFixed(2)}, percent=${r.percent.toFixed(2)}%, segmentIndex=${i}`);
     });
 }
 
