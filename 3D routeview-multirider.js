@@ -132,6 +132,52 @@
         }
         const totalDist = cum[cum.length-1]||1;
         console.log(`[3D Viewer] Scene total distance: ${totalDist.toFixed(2)} units`);
+// --- Route Direction Detection via active SVG polyline ---
+let routeDirection = 1; // 1 = A -> B, -1 = B -> A
+let lastActivePolyline = null;
+
+function getActivePolyline() {
+    return document.querySelector('polyline[stroke-width="2"]');
+}
+
+function updateRouteDirection() {
+    const p = getActivePolyline();
+    if (!p) return;
+
+    if (!lastActivePolyline) {
+        lastActivePolyline = p;
+        routeDirection = 1; // first load = forward
+        console.log("[3D Viewer] Initial route direction: A → B");
+        return;
+    }
+
+    if (p !== lastActivePolyline) {
+        routeDirection *= -1; // FLIP DIRECTION
+        lastActivePolyline = p;
+        console.log("[3D Viewer] Route direction flipped:", routeDirection === 1 ? "A → B" : "B → A");
+    }
+}
+function updateStartEndMarkers() {
+    if (!points.length) return;
+
+    let startPoint, endPoint;
+
+    if (routeDirection === 1) {
+        startPoint = points[0];
+        endPoint   = points[points.length - 1];
+    } else {
+        startPoint = points[points.length - 1];
+        endPoint   = points[0];
+    }
+
+    startMarker.position.x = startPoint.x;
+    startMarker.position.z = startPoint.z;
+    startMarker.position.y = startPoint.y + 0.6;
+
+    endMarker.position.x = endPoint.x;
+    endMarker.position.z = endPoint.z;
+    endMarker.position.y = endPoint.y + 0.6;
+}
 
         // --- Get real-world route length from page/fallback ---
 let distanceKm = null;
@@ -167,6 +213,29 @@ if (distanceKm !== null) {
         const engine = new BABYLON.Engine(canvas,true,{preserveDrawingBuffer:true,stencil:true,premultipliedAlpha:false});
         const scene = new BABYLON.Scene(engine);
         scene.clearColor = new BABYLON.Color4(0,0,0,0.5);
+        // --- START & END ROUTE MARKERS ---
+const startMarker = BABYLON.MeshBuilder.CreateCylinder("startMarker", {
+    height: 1.2,
+    diameter: 0.10
+}, scene);
+
+const endMarker = BABYLON.MeshBuilder.CreateCylinder("endMarker", {
+    height: 1.2,
+    diameter: 0.10
+}, scene);
+
+// Materials
+const startMat = new BABYLON.StandardMaterial("startMat", scene);
+startMat.emissiveColor = new BABYLON.Color3(0, 1, 0); // green
+startMarker.material = startMat;
+
+const endMat = new BABYLON.StandardMaterial("endMat", scene);
+endMat.emissiveColor = new BABYLON.Color3(1, 0, 0); // red
+endMarker.material = endMat;
+
+// Lift them above the ground a bit
+startMarker.position.y += 0.6;
+endMarker.position.y += 0.6;
         const radius=Math.max(...points.map(p=>p.length()))*2;
         const camera = new BABYLON.ArcRotateCamera("cam",Math.PI/2,Math.PI/3,radius,BABYLON.Vector3.Zero(),scene);
         camera.attachControl(canvas,true);
@@ -242,7 +311,10 @@ if (distanceKm !== null) {
             if(!cursorEl) return;
             const m = cursorEl.style.left.match(/([\d.]+)%/); if(!m) return;
             const pct = parseFloat(m[1])/100; if(!isFinite(pct)) return;
-            const targetDist = pct*totalDist;
+let targetDist = pct * totalDist;
+if (routeDirection === -1) {
+    targetDist = totalDist - targetDist;
+}
             const i = findSegmentIndexByDist(targetDist);
             const segStart=cum[i], segEnd=cum[i+1], segLen=segEnd-segStart||1;
             const localT=(targetDist-segStart)/segLen;
@@ -324,7 +396,11 @@ function updateRidersMarkers() {
 
         // Use riderKm to compute position
         const targetDistMeters = r.riderKm * 1000;
-        const targetDist = targetDistMeters / metersPerSceneUnit;
+let targetDist = targetDistMeters / metersPerSceneUnit;
+
+if (routeDirection === -1) {
+    targetDist = totalDist - targetDist;
+}
 
         let i = 0;
         while (i < cum.length - 1 && !(cum[i] <= targetDist && targetDist <= cum[i + 1])) i++;
@@ -340,6 +416,8 @@ function updateRidersMarkers() {
 
         // --- Render Loop ---
         engine.runRenderLoop(()=>{
+                updateRouteDirection();   // ✅ live direction tracking
+                updateStartEndMarkers();   // ✅ START/END live update
             updateMarkerFromCursor();
             updateRidersMarkers();
             camera.setTarget(marker.position);
