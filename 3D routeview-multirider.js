@@ -372,12 +372,12 @@ if (distEl) {
     });
 
     // Debug log all riders
-/*    console.log("[3D Viewer] Rider positions:");
+   /* console.log("[3D Viewer] Rider positions:");
     results.forEach(r => {
         console.log(
             `${r.name}: offsetKm=${r.offsetKm.toFixed(3)} km, riderKm=${r.riderKm.toFixed(3)} km, percent=${r.percent.toFixed(2)}%`
-        ); */
-    });
+        );
+    }); */
 
     return results;
 }
