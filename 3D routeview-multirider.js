@@ -108,20 +108,20 @@
         const zMin=Math.min(...zVals), zMax=Math.max(...zVals);
         const maxXZ=Math.max(xMax-xMin,zMax-zMin)||1;
 
-        // --- Scene scale based on route length ---
-        const distKm = Math.hypot(xMax-xMin,zMax-zMin)/1000;
-        let sceneScale=20;
-        if(distKm>30) sceneScale=50;
-        if(distKm>60) sceneScale=80;
-        if(distKm>120) sceneScale=150;
-        console.log(`[3D Viewer] Scene scale applied: ${sceneScale}`);
-        let yExag = 0.01;
+ // --- Real-world scaling (1%) ---
+const scaleFactor = 0.01; // 1% of real-world coordinates
+const xCenter = (xMin + xMax) / 2;
+const zCenter = (zMin + zMax) / 2;
+const yMinVal = Math.min(...yVals);
 
-        const points = raw.map((p,i)=>new BABYLON.Vector3(
-            (xVals[i]-(xMin+xMax)/2)/maxXZ*sceneScale,
-            (yVals[i]-Math.min(...yVals))*yExag,
-            (zVals[i]-(zMin+zMax)/2)/maxXZ*sceneScale
-        ));
+const points = raw.map((p,i)=>new BABYLON.Vector3(
+    (xVals[i]-xCenter)*scaleFactor,
+    (yVals[i]-yMinVal)*scaleFactor,
+    (zVals[i]-zCenter)*scaleFactor
+));
+
+console.log(`[3D Viewer] Applied 1% real-world scaling`);
+
 
         // --- Cumulative distances ---
         const cum = new Array(points.length).fill(0);
@@ -287,7 +287,7 @@ endMarker.position.y += 0.6;
 
         // --- Marker Arrow ---
         const marker = BABYLON.MeshBuilder.CreateSphere("marker",{diameter:0.001},scene); marker.isVisible=false;
-        const arrow = BABYLON.MeshBuilder.CreateCylinder("arrow",{height:0.6,diameterTop:0,diameterBottom:0.25,tessellation:12},scene);
+        const arrow = BABYLON.MeshBuilder.CreateCylinder("arrow",{height:0.4,diameterTop:0,diameterBottom:0.2,tessellation:12},scene);
         arrow.rotation.x=Math.PI; arrow.position.y=bottomY+0.6*1.2;
         const arrowMat = new BABYLON.StandardMaterial("arrowMat",scene);
         arrowMat.emissiveColor=new BABYLON.Color3(0.95,0.3,0.2); arrow.material=arrowMat; arrow.alwaysSelectAsActiveMesh=true;
@@ -340,12 +340,12 @@ function getRiderPositions() {
     const ridersEls = document.querySelectorAll(".riders-main .rider");
     if (!ridersEls.length) return results;
 
-    ridersEls.forEach(r => {
-        let name = r.querySelector(".rider-name")?.textContent.trim() || "Unknown";
-        if (name.toLowerCase().includes("you")) return; // skip yourself
+   ridersEls.forEach(rEl => {
+    let name = rEl.querySelector(".rider-name")?.textContent.trim() || "Unknown";
+    if (name.toLowerCase().includes("you")) return; // skip yourself
 
-        let distEl = r.querySelector(".rider-distance .monospace");
-        let offsetKm = 0;
+    let distEl = rEl.querySelector(".rider-distance .monospace");
+    let offsetKm = 0;
 
 if (distEl) {
     // Grab full text including units outside the span
@@ -368,7 +368,7 @@ if (distEl) {
         riderKm = ((riderKm % distanceKm) + distanceKm) % distanceKm;
         const percent = (riderKm / distanceKm) * 100;
 
-        results.push({ name, offsetKm, riderKm, percent });
+    results.push({ name, offsetKm, riderKm, percent, el: rEl }); // <--- add el reference
     });
 
     // Debug log all riders
@@ -398,13 +398,36 @@ function updateRidersMarkers() {
     // Add/update current riders
     riders.forEach(r => {
         let mesh = riderMeshes.get(r.name);
-        if (!mesh) {
-            mesh = BABYLON.MeshBuilder.CreateSphere(r.name, { diameter: 0.1 }, scene);
-            const mat = new BABYLON.StandardMaterial(r.name + "Mat", scene);
-            mat.emissiveColor = new BABYLON.Color3(1, 1, 1); // white for now
-            mesh.material = mat;
-            riderMeshes.set(r.name, mesh);
-        }
+if (!mesh) {
+    mesh = BABYLON.MeshBuilder.CreateSphere(r.name, { diameter: 0.1 }, scene);
+
+    const helmetEl = r.el?.querySelector(".rider-icon-helmet");
+    let color = new BABYLON.Color3(1, 1, 1); // default white
+    if (helmetEl) {
+        const bg = helmetEl.style.background; // e.g., "rgb(223, 115, 58)"
+        const m = bg.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+        if (m) color = new BABYLON.Color3(
+            parseInt(m[1])/255,
+            parseInt(m[2])/255,
+            parseInt(m[3])/255
+        );
+    }
+
+    const mat = new BABYLON.StandardMaterial(r.name + "Mat", scene);
+    mat.diffuseColor = color;       // solid helmet color
+    mat.emissiveColor = color;      // ensures it's bright
+    mat.backFaceCulling = false;    // so outline works from all angles
+
+    // --- Add black outline ---
+    mat.outlineWidth = 1;        // thickness of outline
+    mat.outlineColor = new BABYLON.Color3(0, 0, 0); // black
+
+    mesh.material = mat;
+    riderMeshes.set(r.name, mesh);
+}
+
+
+
 
         // Convert riderKm → scene units
         const targetDist = (r.riderKm / distanceKm) * totalDist * (routeDirection === -1 ? -1 : 1) + (routeDirection === -1 ? totalDist : 0);
