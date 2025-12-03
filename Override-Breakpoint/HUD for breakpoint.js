@@ -12,33 +12,43 @@
 
 (function() {
     'use strict';
+// Function to hide the element
+    function hideOriginalRiderList() {
+        const originalList = document.querySelector('.panel-rider-list');
+        if (originalList) {
+            originalList.style.display = 'none';
+            console.log('✅ Original Rider List Hidden.');
+        } else {
+            // Keep trying until the list is loaded (it loads after the 3D world starts)
+            setTimeout(hideOriginalRiderList, 500);
+        }
+    }
 
+    // Call the function once the script starts
+    hideOriginalRiderList();
     // --- 1. Create the UI Overlay ---
     const container = document.createElement('div');
     container.style.cssText = `
         position: fixed;
-        top: 20px;
-        right: 20px;
-        width: 350px;
-        background: rgba(0, 0, 0, 0.85);
+        top: 8px;
+        right: 8px;
+        width: 20vw;
+        min-width: 350px;
+        background: rgba(0, 0, 0, 0.5);
         color: #00ffcc;
-        font-family: 'Courier New', monospace;
+        font-family: "Overpass", sans-serif;
         font-size: 12px;
         padding: 10px;
-        z-index: 9999;
-        border: 1px solid #00ffcc;
+        z-index: 1;
+        //border: 1px solid #00ffcc;
         border-radius: 8px;
-        box-shadow: 0 0 10px rgba(0, 255, 204, 0.2);
-        max-height: 80vh;
+        max-height: 65vh;
         overflow-y: auto;
     `;
 
     // UPDATED TABLE HEADERS: Name, W/kg, Gap, Dist
     container.innerHTML = `
-        <div style="border-bottom: 1px solid #444; padding-bottom: 5px; margin-bottom: 5px; font-weight: bold; display: flex; justify-content: space-between;">
-            <span>🚴 RIDER HUD</span>
-            <span id="status-light" style="color: red;">● OFFLINE</span>
-        </div>
+        <span id="status-light" style="color: red; text-align: right;">●</span>
         <table style="width: 100%; border-collapse: collapse;">
             <thead>
                 <tr style="text-align: left; color: #fff;">
@@ -54,9 +64,6 @@
                 <tr><td colspan="4" style="text-align: center; color: #888; padding: 10px;">Waiting for breakpoint...</td></tr>
             </tbody>
         </table>
-        <div style="margin-top: 8px; font-size: 10px; color: #666; text-align: center;">
-             Tip: Undock & Minimize console to keep feed active.
-        </div>
     `;
     document.body.appendChild(container);
 
@@ -66,7 +73,7 @@
 
     setInterval(() => {
         if (!window.hackedRiders) {
-            statusLight.innerText = "● WAITING";
+            statusLight.innerText = "●";
             statusLight.style.color = "orange";
             return;
         }
@@ -78,7 +85,7 @@
             riders.sort((a, b) => b.dist - a.dist);
         }
 
-        statusLight.innerText = `● LIVE (${riders.length})`;
+        statusLight.innerText = `●`;
         statusLight.style.color = "#00ff00";
 
         let html = '';
@@ -108,21 +115,20 @@
 
             // Highlight row if it is YOU
             const rowStyle = r.isMe
-                ? "border-bottom: 1px solid #333; background: rgba(0, 255, 204, 0.2);"
+                ? "border-bottom: 1px solid #333; background: rgba(255, 98, 98, 0.8);"
                 : "border-bottom: 1px solid #333;";
 
             html += `
                 <tr style="${rowStyle}">
                     <td style="padding: 4px; color: #fff;">${name}</td>
-                    <td style="padding: 4px;">${power}</td>
-                    <td style="padding: 4px;">${speed}</td>
-                    <td style="padding: 4px; color: ${wkgColor}; font-weight: bold;">${wkg}</td>
-                    <td style="padding: 4px;">${gapText}</td>
-                    <td style="padding: 4px;">${dist}m</td>
+                    <td style="padding: 4px;color: #fff; font-family: Overpass Mono, monospace;">${power}</td>
+                    <td style="padding: 4px;color: #fff;font-family: Overpass Mono, monospace;">${speed}</td>
+                    <td style="padding: 4px; color: ${wkgColor}; font-weight: bold;font-family: Overpass Mono, monospace;">${wkg}</td>
+                    <td style="padding: 4px;color: #fff;font-family: Overpass Mono, monospace;">${gapText}</td>
+                    <td style="padding: 4px;color: #fff;font-family: Overpass Mono, monospace;">${dist}m</td>
                 </tr>
             `;
         });
-
         tbody.innerHTML = html;
 
     }, 1000); // 1-second update
