@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra HUD (Final)
 // @namespace    http://tampermonkey.net/
-// @version      3.0
-// @description  Overlay that shows W/kg, Gap, and sorts riders by distance.
+// @version      9.0
+// @description  FINAL: Adds accurate metrics, sorting, and stable spectating functionality.
 // @author       You
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate*
@@ -12,21 +12,60 @@
 
 (function() {
     'use strict';
-// Function to hide the element
+
+    // --- Global Function to Handle Spectate Click ---
+    // This function calls the public wrapper function (assumed to be 'B')
+    window.spectateRiderById = function(riderId) {
+        if (!window.gameManager) {
+            console.error("Game Manager not exposed. Is breakpoint active?");
+            return;
+        }
+
+        // We use the ID directly as the spectate function expects the athleteId
+        if (!riderId) {
+             console.warn("Cannot spectate: Rider ID is null or undefined.");
+             return;
+        }
+
+        // 1. Find the CLEANED rider object (for logging the name)
+        const cleanedRider = window.hackedRiders.find(r => r.riderId == riderId);
+
+        // 2. --- HACK: Identify and call the spectate function ---
+
+        let spectateFn = null;
+        let functionName = 'setFocalRider'; // Start with the strongest candidate
+
+        // We check for the function directly
+        if (typeof window.gameManager[functionName] === 'function') {
+             spectateFn = window.gameManager.setFocalRider;
+        } else {
+            // The brute-force check logic failed before, so we must rely on the user testing candidates.
+            console.error(`❌ Spectate function failed: window.gameManager.${functionName} not found.`);
+            return;
+        }
+
+        // Final Function Call
+        if (typeof spectateFn === 'function') {
+            // Call the function, passing the Rider ID (r.athleteId)
+            spectateFn.call(window.gameManager, riderId);
+            // Log the name from the CLEANED object
+            console.log(`📡 Spectating: ${cleanedRider ? cleanedRider.name : "Unknown Rider"} (ID: ${riderId})`);
+        }
+    };
+    // ----------------------------------------------------
+
+    // Function to hide the element
     function hideOriginalRiderList() {
         const originalList = document.querySelector('.panel-rider-list');
         if (originalList) {
             originalList.style.display = 'none';
-            console.log('✅ Original Rider List Hidden.');
         } else {
-            // Keep trying until the list is loaded (it loads after the 3D world starts)
             setTimeout(hideOriginalRiderList, 500);
         }
     }
-
-    // Call the function once the script starts
     hideOriginalRiderList();
-    // --- 1. Create the UI Overlay ---
+
+    // --- 1. Create the UI Overlay (using your custom styling) ---
     const container = document.createElement('div');
     container.style.cssText = `
         position: fixed;
@@ -40,13 +79,12 @@
         font-size: 12px;
         padding: 10px;
         z-index: 1;
-        //border: 1px solid #00ffcc;
         border-radius: 8px;
         max-height: 65vh;
         overflow-y: auto;
     `;
 
-    // UPDATED TABLE HEADERS: Name, W/kg, Gap, Dist
+    // UPDATED TABLE HEADERS
     container.innerHTML = `
         <span id="status-light" style="color: red; text-align: right;">●</span>
         <table style="width: 100%; border-collapse: collapse;">
@@ -94,7 +132,7 @@
             const dist = r.dist.toFixed(2);
             const speed = (r.speed * 3.6).toFixed(1);
             const power = Math.round(r.power);
-            // --- METRIC FORMATTING ---
+
             const wkg = r.wkg.toFixed(1);
             let gap = r.distanceFromMe;
             let gapText;
@@ -115,11 +153,12 @@
 
             // Highlight row if it is YOU
             const rowStyle = r.isMe
-                ? "border-bottom: 1px solid #333; background: rgba(255, 98, 98, 0.8);"
-                : "border-bottom: 1px solid #333;";
+                ? "border-bottom: 1px solid #333; background: rgba(255, 98, 98, 0.8); cursor: default;"
+                : "border-bottom: 1px solid #333; cursor: pointer;";
 
+            // --- CRITICAL: ADD ONCLICK HANDLER AND PASS RIDER ID ---
             html += `
-                <tr style="${rowStyle}">
+                <tr style="${rowStyle}" onclick="window.spectateRiderById(${r.riderId || 0})">
                     <td style="padding: 4px; color: #fff;">${name}</td>
                     <td style="padding: 4px;color: #fff; font-family: Overpass Mono, monospace;">${power}</td>
                     <td style="padding: 4px;color: #fff;font-family: Overpass Mono, monospace;">${speed}</td>
