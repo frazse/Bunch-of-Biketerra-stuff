@@ -11,7 +11,9 @@ Change this: humanRiderPositions.set(o)
 To this: window.hackedRiders=this.humansList;humanRiderPositions.set(o)
 Save the file and reload the page.
 (I have not tried this so ymmv.)
-But this is what it should give you access to:
+
+ 
+This is what it should give you access to:
 
 Identity	r.config.first_name, r.config.last_name	Name String	Player Name / "ME" flag
 Performance	r.power	Raw Watts	Power Output
