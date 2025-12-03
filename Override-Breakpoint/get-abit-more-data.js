@@ -29,18 +29,19 @@ Configuration	r.config.weight	Rider Weight (kg)	Used to calculate Watts/kg <- Ot
 const others = this.humansList || [];
 const me = this.focalRider;
 
-// 2. --- FIXED ARRAY CREATION ---
-// Filter out the local player instance from the network list, 
-// then add the local player back once (guaranteed visibility).
+// 2. --- DEDUPLICATION LOGIC ---
 const filteredOthers = others.filter(rider => rider !== me);
 const allRiders = me ? [me, ...filteredOthers] : filteredOthers;
-// --- END FIXED ARRAY CREATION ---
+// --------------------------------------------------
 
+// 3. --- CRITICAL: EXPOSE GAME MANAGER FOR SPECTATING ---
+window.gameManager = this;
+// --------------------------------------------------
 
-// 3. Get local player's current distance for gap calculation
+// 4. Get local player's current distance for gap calculation
 const myDistance = me ? me.currentPathDistance : 0;
 
-// 4. Map the combined list to our clean format
+// 5. Map the combined list to our clean format
 window.hackedRiders = allRiders.map(r => {
     const c = r.config || {};
     
@@ -49,29 +50,27 @@ window.hackedRiders = allRiders.map(r => {
     const l = c.last_name || "";
     let fullName = (f + " " + l).trim();
     
-    // If name is empty, assume it's the local player and use the fallback
-    // Me = Change to your own name if you want to.
-    if (!fullName && r === me) fullName = "Me";
+    if (!fullName && r === me) fullName = "ME (Local User)";
 
-    // --- BULLETPROOF W/KG CALCULATION ---
+    // --- CALCULATIONS ---
     const watts = r.power || 0;
-    
-    // Use the confirmed property: r.config.weight (in GRAMS)
-    // Total Mass is calculated from network data for everyone.
-    const weightInGrams = c.weight || 103000; // CHANGE THIS TO YOUR WEIGHT FOR ACCURATE W/KG Default to 75000 grams if config is missing
-    const weightInKg = weightInGrams > 0 ? (weightInGrams / 1000) : 103; // CHANGE THIS TO YOUR WEIGHT FOR ACCURATE W/KG CONVERT GRAMS TO KG
-    
+    const weightInGrams = c.weight || 103000;
+    const weightInKg = weightInGrams > 0 ? (weightInGrams / 1000) : 103;
     const wkg = weightInKg > 0 ? (watts / weightInKg) : 0;
-    // ----------------------------------
-   
+    
+
+
     return {
-        name: fullName || ("Rider " + (r.id || "?")),
+        name: fullName || ("Rider " + (r.athleteId || "?")),
         dist: r.currentPathDistance,
         wkg: wkg,
         distanceFromMe: r.currentPathDistance - myDistance,
         speed: r.speed,
         power: watts,
-        isMe: (r === me)
+        isMe: (r === me),
+        
+        // CRITICAL: Use athleteId for spectating
+        riderId: r.athleteId 
     };
 });
 
