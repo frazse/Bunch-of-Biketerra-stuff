@@ -20,26 +20,27 @@ Performance	r.power	Raw Watts	Power Output
 Physics	r.speed	Speed (m/s)	Used to calculate km/h
 Position	r.currentPathDistance	Route Distance (meters)	Total distance traveled (for sorting)
 Position	r.position.x, r.position.z	3D Coordinates	Location in the game world
-Configuration	r.config.weight	Rider Weight (kg)	Used to calculate Watts/kg
+Configuration	r.config.weight	Rider Weight (kg)	Used to calculate Watts/kg <- Other riders, not yours
 
 
 ###################################################
 /* PASTE THIS INTO THE CONDITIONAL BREAKPOINT BOX */
 // 1. Get the list of other players
 const others = this.humansList || [];
-
-// 2. Get YOUR player (focalRider)
 const me = this.focalRider;
 
-// 3. Combine them into one array
-const allRiders = me ? [me, ...others] : others;
+// 2. --- FIXED ARRAY CREATION ---
+// Filter out the local player instance from the network list, 
+// then add the local player back once (guaranteed visibility).
+const filteredOthers = others.filter(rider => rider !== me);
+const allRiders = me ? [me, ...filteredOthers] : filteredOthers;
+// --- END FIXED ARRAY CREATION ---
 
-// 4. Get local player's current distance and weight for calculations
+
+// 3. Get local player's current distance for gap calculation
 const myDistance = me ? me.currentPathDistance : 0;
-// We use 75kg as a default if the local player's weight isn't exposed.
-const defaultWeight = me && me.config ? me.config.weight : 75; 
 
-// 5. Map the combined list to our clean format
+// 4. Map the combined list to our clean format
 window.hackedRiders = allRiders.map(r => {
     const c = r.config || {};
     
@@ -48,25 +49,30 @@ window.hackedRiders = allRiders.map(r => {
     const l = c.last_name || "";
     let fullName = (f + " " + l).trim();
     
-    // If name is empty, check if it's YOU
-    if (!fullName && r === me) fullName = "ME (Local User)";
+    // If name is empty, assume it's the local player and use the fallback
+    // Me = Change to your own name if you want to.
+    if (!fullName && r === me) fullName = "Me";
 
-    // --- CALCULATIONS ---
+    // --- BULLETPROOF W/KG CALCULATION ---
     const watts = r.power || 0;
-    const weight = c.weight || defaultWeight; // Use rider's weight, default to local player's weight
-    const wkg = weight > 0 ? (watts / weight) : 0;
-
+    
+    // Use the confirmed property: r.config.weight (in GRAMS)
+    // Total Mass is calculated from network data for everyone.
+    const weightInGrams = c.weight || 103000; // CHANGE THIS TO YOUR WEIGHT FOR ACCURATE W/KG Default to 75000 grams if config is missing
+    const weightInKg = weightInGrams > 0 ? (weightInGrams / 1000) : 103; // CHANGE THIS TO YOUR WEIGHT FOR ACCURATE W/KG CONVERT GRAMS TO KG
+    
+    const wkg = weightInKg > 0 ? (watts / weightInKg) : 0;
+    // ----------------------------------
+   
     return {
         name: fullName || ("Rider " + (r.id || "?")),
         dist: r.currentPathDistance,
-        wkg: wkg, // W/kg
-        distanceFromMe: r.currentPathDistance - myDistance, // Gap
+        wkg: wkg,
+        distanceFromMe: r.currentPathDistance - myDistance,
         speed: r.speed,
         power: watts,
-        x: r.position.x,
-        z: r.position.z,
         isMe: (r === me)
     };
 });
 
-false;
+false; // Don't pause!
