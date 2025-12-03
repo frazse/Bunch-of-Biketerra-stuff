@@ -24,6 +24,7 @@ Configuration	r.config.weight	Rider Weight (kg)	Used to calculate Watts/kg
 
 
 ###################################################
+/* PASTE THIS INTO THE CONDITIONAL BREAKPOINT BOX */
 // 1. Get the list of other players
 const others = this.humansList || [];
 
@@ -31,10 +32,14 @@ const others = this.humansList || [];
 const me = this.focalRider;
 
 // 3. Combine them into one array
-// (We check if 'me' exists just in case you are in spectator mode)
 const allRiders = me ? [me, ...others] : others;
 
-// 4. Map the combined list to our clean format
+// 4. Get local player's current distance and weight for calculations
+const myDistance = me ? me.currentPathDistance : 0;
+// We use 75kg as a default if the local player's weight isn't exposed.
+const defaultWeight = me && me.config ? me.config.weight : 75; 
+
+// 5. Map the combined list to our clean format
 window.hackedRiders = allRiders.map(r => {
     const c = r.config || {};
     
@@ -44,18 +49,24 @@ window.hackedRiders = allRiders.map(r => {
     let fullName = (f + " " + l).trim();
     
     // If name is empty, check if it's YOU
-    if (!fullName && r === me) fullName = "SET_YOUR_NAME";
+    if (!fullName && r === me) fullName = "ME (Local User)";
+
+    // --- CALCULATIONS ---
+    const watts = r.power || 0;
+    const weight = c.weight || defaultWeight; // Use rider's weight, default to local player's weight
+    const wkg = weight > 0 ? (watts / weight) : 0;
 
     return {
         name: fullName || ("Rider " + (r.id || "?")),
         dist: r.currentPathDistance,
+        wkg: wkg, // W/kg
+        distanceFromMe: r.currentPathDistance - myDistance, // Gap
         speed: r.speed,
-        power: r.power,
+        power: watts,
         x: r.position.x,
         z: r.position.z,
-        // Add a flag so we can color your own name differently later if we want
-        isMe: (r === me) 
+        isMe: (r === me)
     };
 });
 
-false; // Don't pause!
+false;
