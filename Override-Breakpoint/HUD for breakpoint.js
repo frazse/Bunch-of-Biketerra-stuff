@@ -44,6 +44,7 @@
                 <tr style="text-align: left; color: #fff;">
                     <th style="padding: 2px;">Name</th>
                     <th style="padding: 2px;">Power</th>
+                    <th style="padding: 2px;">Speed</th>
                     <th style="padding: 2px;">W/kg</th>
                     <th style="padding: 2px;">Gap</th>
                     <th style="padding: 2px;">Dist</th>
@@ -84,6 +85,7 @@
         riders.forEach(r => {
             const name = r.name || "Unknown";
             const dist = r.dist.toFixed(2);
+            const speed = (r.speed * 3.6).toFixed(1);
             const power = Math.round(r.power);
             // --- METRIC FORMATTING ---
             const wkg = r.wkg.toFixed(1);
@@ -113,6 +115,7 @@
                 <tr style="${rowStyle}">
                     <td style="padding: 4px; color: #fff;">${name}</td>
                     <td style="padding: 4px;">${power}</td>
+                    <td style="padding: 4px;">${speed}</td>
                     <td style="padding: 4px; color: ${wkgColor}; font-weight: bold;">${wkg}</td>
                     <td style="padding: 4px;">${gapText}</td>
                     <td style="padding: 4px;">${dist}m</td>
