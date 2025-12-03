@@ -11,7 +11,14 @@ Change this: humanRiderPositions.set(o)
 To this: window.hackedRiders=this.humansList;humanRiderPositions.set(o)
 Save the file and reload the page.
 (I have not tried this so ymmv.)
+But this is what it should give you access to:
 
+Identity	r.config.first_name, r.config.last_name	Name String	Player Name / "ME" flag
+Performance	r.power	Raw Watts	Power Output
+Physics	r.speed	Speed (m/s)	Used to calculate km/h
+Position	r.currentPathDistance	Route Distance (meters)	Total distance traveled (for sorting)
+Position	r.position.x, r.position.z	3D Coordinates	Location in the game world
+Configuration	r.config.weight	Rider Weight (kg)	Used to calculate Watts/kg
 
 
 ###################################################
