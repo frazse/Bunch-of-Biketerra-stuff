@@ -166,19 +166,38 @@
             if (r.wkg >= 10.0) wkgColor = '#ff4444';
             else if (r.wkg >= 3.5) wkgColor = '#ffcc00';
 
-            const rowStyle = r.isMe
-                ? "border-bottom:1px solid #333; background:rgba(255,98,98,0.8); cursor:default;"
-                : "border-bottom:1px solid #333; cursor:pointer;";
+// --- Helmet Color Cascade Logic (FINAL & SAFE) ---
+const helmetColor =
+    r.entity?.design?.helmet_color ||   // ✅ Local live 3D rider (YOU + nearby riders)
+    r.config?.design?.helmet_color ||   // ✅ Network config fallback
+    '#444444';                          // ✅ Hard fallback
+
+// Convert HEX → RGBA for readable transparent background
+let bgColor = helmetColor;
+
+if (helmetColor.startsWith('#') && helmetColor.length === 7) {
+    const rC = parseInt(helmetColor.slice(1, 3), 16);
+    const gC = parseInt(helmetColor.slice(3, 5), 16);
+    const bC = parseInt(helmetColor.slice(5, 7), 16);
+    bgColor = `rgba(${rC}, ${gC}, ${bC}, 0.6)`;
+}
+
+const rowStyle = `
+    border-bottom: 1px solid #333;
+    background: ${bgColor};
+    cursor: ${r.isMe ? "default" : "pointer"};
+`;
+
 
             html += `
                 <tr style="${rowStyle}" onclick="window.spectateRiderById(${r.riderId || 0})">
-                    <td style="padding:4px; color:#fff;">${name}</td>
-                    <td style="padding:4px;color:#fff; font-family:Overpass Mono, monospace;">${power}</td>
-                    <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;">${speed}</td>
-                    <td style="padding:4px;color:${wkgColor}; font-weight:bold; font-family:Overpass Mono, monospace;">${wkg}</td>
-                    <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;">${gapText}</td>
-                    <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;">${dist}m</td>
-                    <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;">${r.lap}</td>
+                    <td style="padding:4px; color:#fff;text-shadow: 1px 1px 4px #000">${name}</td>
+                    <td style="padding:4px;color:#fff; font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${power}</td>
+                    <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${speed}</td>
+                    <td style="padding:4px;color:${wkgColor}; font-weight:bold; font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000;">${wkg}</td>
+                    <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${gapText}</td>
+                    <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${dist}m</td>
+                    <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${r.lap}</td>
                 </tr>
             `;
         });
