@@ -1,5 +1,5 @@
 In the file BJ3MmXx5.js
-Search for "humanRiderPositions.set(o)"
+Search for "this.riderController.update(x)"
 Right-click on linenumber which in this case is just - and click "Add Conditional Breakpoint"
 Paste the code below, change SET_YOUR_NAME to yourown name and hit enter
 
@@ -24,24 +24,40 @@ Configuration	r.config.weight	Rider Weight (kg)	Used to calculate Watts/kg <- Ot
 
 
 ###################################################
-// 1. Get riders
-const others = this.humansList || [];
-const me = this.focalRider;
+/* FINAL LOCATION-INDEPENDENT BREAKPOINT CODE */
+// 1. Get the RiderController instance (the actual game manager)
+const rc = this.riderController;
 
-// 2. Deduplicate
-const filteredOthers = others.filter(r => r !== me);
-const allRiders = me ? [me, ...filteredOthers] : filteredOthers;
+// 2. Get the raw sources from the RiderController
+const others = rc.humansList || [];
+const me = rc.focalRider;
 
-// 3. Expose game manager for spectating
-window.gameManager = this;
+// 3. --- GUARANTEED ARRAY CREATION FIX ---
+let allRiders = [];
 
-// 4. Initialize global lap tracker
+if (me) {
+    allRiders.push(me);
+}
+
+for (const rider of others) {
+    if (rider !== me) {
+        allRiders.push(rider);
+    }
+}
+// ------------------------------------------
+
+// 4. --- CRITICAL: EXPOSE GAME MANAGER FOR SPECTATING ---
+window.gameManager = rc; // Expose the correct RiderController object
+// --------------------------------------------------
+
+// 5. Initialize global lap tracker (MUST be in the breakpoint to run reliably)
 window.__lapTracker = window.__lapTracker || {};
+const LAP_THRESHOLD = 1000; 
 
-// 5. Get my distance
+// 6. Get my distance
 const myDistance = me ? me.currentPathDistance : 0;
 
-// 6. Map riders
+// 7. Map riders
 window.hackedRiders = allRiders.map(r => {
     const c = r.config || {};
     const f = c.first_name || "";
@@ -50,12 +66,12 @@ window.hackedRiders = allRiders.map(r => {
     if (!fullName && r === me) fullName = "ME (Local User)";
 
     const watts = r.power || 0;
-    const weightInGrams = c.weight || 103000;
+    const weightInGrams = c.weight || 103000; 
     const weightInKg = weightInGrams > 0 ? weightInGrams / 1000 : 103;
     const wkg = weightInKg > 0 ? watts / weightInKg : 0;
 
     const dist = r.currentPathDistance || 0;
-    const riderId = r.athleteId || r.id;
+    const riderId = r.athleteId || r.id; 
 
     // Initialize rider lap tracker
     if (!window.__lapTracker[riderId]) {
@@ -67,13 +83,13 @@ window.hackedRiders = allRiders.map(r => {
 
     // Detect lap reset (distance drop)
     const tracker = window.__lapTracker[riderId];
-    if (dist < tracker.lastDist - 1000) { // threshold 1000m
+    if (dist < tracker.lastDist - LAP_THRESHOLD) { 
         tracker.lap++;
     }
     tracker.lastDist = dist;
 
     // Compute lap distance
-    const lapDistance = dist >= 0 ? dist : (dist + tracker.lastDist + 1000); // adjust negative wrap
+    const lapDistance = dist >= 0 ? dist : (dist + tracker.lastDist + LAP_THRESHOLD); 
 
     return {
         name: fullName || ("Rider " + riderId),
