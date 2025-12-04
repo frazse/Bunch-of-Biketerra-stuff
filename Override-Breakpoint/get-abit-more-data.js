@@ -25,15 +25,13 @@ Configuration	r.config.weight	Rider Weight (kg)	Used to calculate Watts/kg <- Ot
 
 ###################################################
 /* FINAL LOCATION-INDEPENDENT BREAKPOINT CODE */
-// 1. Get the RiderController instance (the actual game manager)
-const rc = this.riderController;
+/* FINAL, GUARANTEED BREAKPOINT CODE (V4.0 - FIXES STARTUP RESET) */
+// 1. Get the raw sources
+const others = this.humansList || [];
+const me = this.focalRider;
 
-// 2. Get the raw sources from the RiderController
-const others = rc.humansList || [];
-const me = rc.focalRider;
-
-// 3. --- GUARANTEED ARRAY CREATION FIX ---
-let allRiders = [];
+// 2. --- GUARANTEED ARRAY CREATION FIX ---
+const allRiders = [];
 
 if (me) {
     allRiders.push(me);
@@ -44,20 +42,20 @@ for (const rider of others) {
         allRiders.push(rider);
     }
 }
-// ------------------------------------------
+// -------------------------------------------------------------------
 
-// 4. --- CRITICAL: EXPOSE GAME MANAGER FOR SPECTATING ---
-window.gameManager = rc; // Expose the correct RiderController object
-// --------------------------------------------------
+// 3. Expose game manager for spectating
+window.gameManager = this.riderController || this;
 
-// 5. Initialize global lap tracker (MUST be in the breakpoint to run reliably)
+// 4. Initialize global lap tracker (MUST be in the breakpoint to run reliably)
 window.__lapTracker = window.__lapTracker || {};
 const LAP_THRESHOLD = 1000; 
+const INIT_DISTANCE_LIMIT = 100; // Ignore drops when distance is near the start
 
-// 6. Get my distance
+// 5. Get my distance
 const myDistance = me ? me.currentPathDistance : 0;
 
-// 7. Map riders
+// 6. Map riders
 window.hackedRiders = allRiders.map(r => {
     const c = r.config || {};
     const f = c.first_name || "";
@@ -77,16 +75,31 @@ window.hackedRiders = allRiders.map(r => {
     if (!window.__lapTracker[riderId]) {
         window.__lapTracker[riderId] = {
             lap: 1,
-            lastDist: dist
+            lastDist: dist,
+            // FIX: Set to true once we pass the initial 'jump' phase
+            isInitialized: false 
         };
     }
 
-    // Detect lap reset (distance drop)
     const tracker = window.__lapTracker[riderId];
-    if (dist < tracker.lastDist - LAP_THRESHOLD) { 
-        tracker.lap++;
+    
+    // --- LAP TRACKING LOGIC ---
+    if (!tracker.isInitialized) {
+        // 1. On startup, check if the distance is stable (i.e., near zero or after a reset).
+        if (dist < INIT_DISTANCE_LIMIT && dist >= 0) {
+            tracker.isInitialized = true;
+            tracker.lastDist = dist;
+        }
+    } else {
+        // 2. Only track drops once initialized
+        if (dist < tracker.lastDist - LAP_THRESHOLD) { 
+            tracker.lap++;
+        }
+        // 3. Always update lastDist once tracking is active
+        tracker.lastDist = dist;
     }
-    tracker.lastDist = dist;
+    
+    // --- END LAP TRACKING LOGIC ---
 
     // Compute lap distance
     const lapDistance = dist >= 0 ? dist : (dist + tracker.lastDist + LAP_THRESHOLD); 
