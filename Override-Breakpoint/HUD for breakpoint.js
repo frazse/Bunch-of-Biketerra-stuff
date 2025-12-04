@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra - Riderlist replacement HUD
 // @namespace    http://tampermonkey.net/
-// @version      10.0
-// @description  HUD with dynamic lap tracking, lap distance, and lapped rider detection
+// @version      11.0
+// @description  FINAL: HUD with accurate metrics, dynamic lap tracking, and spectate functionality (URL aware).
 // @author       You
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate*
@@ -15,18 +15,36 @@
 
     // --- Spectate function ---
     window.spectateRiderById = function(riderId) {
-        if (!window.gameManager) return;
-        if (!riderId) return;
+        // Only run if the URL contains '/spectate' AND gameManager is exposed
+        if (!window.location.href.includes('/spectate') || !window.gameManager) {
+             // We do nothing if not in spectate mode or if the data source is missing
+             return;
+        }
+
+        if (!riderId || riderId === 0) {
+            console.warn("Spectate failed: Invalid or null Rider ID.");
+            return;
+        }
+
         const cleanedRider = window.hackedRiders.find(r => r.riderId == riderId);
-        const fn = window.gameManager.setFocalRider;
-        if (typeof fn === 'function') {
-            fn.call(window.gameManager, riderId);
+
+        // --- FINAL FUNCTION CALL ---
+        // We use the most probable minified function: 'B' (which takes the ID).
+        const spectateFn = window.gameManager.B;
+
+        if (typeof spectateFn === 'function') {
+            // Call the function, passing the Rider ID (r.athleteId)
+            spectateFn.call(window.gameManager, riderId);
             console.log(`📡 Spectating: ${cleanedRider?.name || "Unknown"} (ID: ${riderId})`);
+        } else {
+            // This is the error message if 'B' is the wrong letter
+            console.error("❌ Spectate function (B) not found. Check console for correct letter.");
         }
     };
 
     // --- Hide original list ---
     function hideOriginalRiderList() {
+        // Hides the element that contains the original rider list
         const original = document.querySelector('.riders-main');
         if (original) original.style.display = 'none';
         else setTimeout(hideOriginalRiderList, 500);
@@ -56,13 +74,13 @@
         <table style="width:100%; border-collapse:collapse;">
             <thead>
                 <tr style="text-align:left; color:#fff;">
-                    <th>Name</th>
-                    <th>Power</th>
-                    <th>Speed</th>
-                    <th>W/kg</th>
-                    <th>Gap</th>
-                    <th>Dist</th>
-                    <th>Lap</th>
+                    <th style="padding:2px;">Name</th>
+                    <th style="padding:2px;">Power</th>
+                    <th style="padding:2px;">Speed</th>
+                    <th style="padding:2px;">W/kg</th>
+                    <th style="padding:2px;">Gap</th>
+                    <th style="padding:2px;">Dist</th>
+                    <th style="padding:2px;">Lap</th>
                 </tr>
             </thead>
             <tbody id="rider-table-body">
@@ -75,7 +93,7 @@
     const tbody = document.getElementById('rider-table-body');
     const statusLight = document.getElementById('status-light');
 
-    // --- Lap tracking ---
+    // --- Lap tracking state ---
     window.__lapTracker = window.__lapTracker || {};
     const LAP_THRESHOLD = 1000; // distance drop to detect lap reset
 
@@ -87,9 +105,9 @@
         }
 
         let riders = [...window.hackedRiders];
+        let leaderLap = 0;
 
         // Update laps dynamically
-        let leaderLap = 0;
         riders.forEach(r => {
             const dist = r.dist;
             const id = r.riderId;
@@ -100,12 +118,14 @@
 
             const tracker = window.__lapTracker[id];
 
+            // If distance suddenly drops, assume a lap finished
             if (dist < tracker.lastDist - LAP_THRESHOLD) {
                 tracker.lap++;
             }
 
             tracker.lastDist = dist;
             r.lap = tracker.lap;
+            // Calculate distance into current lap (or use total dist if it's not a loop)
             r.lapDistance = dist >= 0 ? dist : (tracker.lastDist + dist + LAP_THRESHOLD);
 
             if (tracker.lap > leaderLap) leaderLap = tracker.lap;
@@ -122,6 +142,8 @@
 
         // --- Build table ---
         let html = '';
+        const currentLeaderDist = riders[0]?.lapDistance || 0;
+
         riders.forEach(r => {
             const name = r.name || "Unknown";
             const dist = r.lapDistance.toFixed(2);
@@ -133,7 +155,8 @@
             let gapText;
             if (r.lap < leaderLap) gapText = `+${leaderLap - r.lap} Lap${leaderLap - r.lap > 1 ? "s" : ""}`;
             else {
-                const gapMeters = r.lapDistance - riders[0].lapDistance;
+                // Gap is relative to the current leader on the same lap
+                const gapMeters = r.lapDistance - currentLeaderDist;
                 if (gapMeters === 0) gapText = "0m";
                 else gapText = `${Math.round(gapMeters)}m`;
             }
@@ -154,7 +177,7 @@
                     <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;">${speed}</td>
                     <td style="padding:4px;color:${wkgColor}; font-weight:bold; font-family:Overpass Mono, monospace;">${wkg}</td>
                     <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;">${gapText}</td>
-                    <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;">${dist}</td>
+                    <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;">${dist}m</td>
                     <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;">${r.lap}</td>
                 </tr>
             `;
@@ -162,6 +185,6 @@
 
         tbody.innerHTML = html;
 
-    }, 500);
+    }, 500); // Increased update frequency for better tracking
 
 })();
