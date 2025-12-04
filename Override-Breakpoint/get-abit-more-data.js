@@ -1,5 +1,6 @@
 In Devtools->Sources.
-Search for "this.riderController.update(x)" and go to that line.
+For solo rides: Search for "this.riderController.update(x)" and go to that line.
+For race/events: Search for "humanRiderPositions.set(o)" and go to that line.
 Right-click on linenumber which in this case is just - and click "Add Conditional Breakpoint"
 Paste the code below, change SET_YOUR_NAME to yourown name and hit enter
 
