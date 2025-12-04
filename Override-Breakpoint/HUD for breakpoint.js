@@ -56,7 +56,7 @@
 
     // Function to hide the element
     function hideOriginalRiderList() {
-        const originalList = document.querySelector('.panel-rider-list');
+        const originalList = document.querySelector('.riders-main');
         if (originalList) {
             originalList.style.display = 'none';
         } else {
