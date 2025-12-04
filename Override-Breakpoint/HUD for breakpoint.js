@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Biketerra HUD (Dynamic Laps)
+// @name         Biketerra - Riderlist replacement HUD
 // @namespace    http://tampermonkey.net/
 // @version      10.0
 // @description  HUD with dynamic lap tracking, lap distance, and lapped rider detection
