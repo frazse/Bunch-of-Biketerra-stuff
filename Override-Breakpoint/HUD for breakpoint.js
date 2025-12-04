@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Biketerra HUD (Final)
+// @name         Biketerra HUD (Dynamic Laps)
 // @namespace    http://tampermonkey.net/
-// @version      9.0
-// @description  FINAL: Adds accurate metrics, sorting, and stable spectating functionality.
+// @version      10.0
+// @description  HUD with dynamic lap tracking, lap distance, and lapped rider detection
 // @author       You
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate*
@@ -13,59 +13,27 @@
 (function() {
     'use strict';
 
-    // --- Global Function to Handle Spectate Click ---
-    // This function calls the public wrapper function (assumed to be 'B')
+    // --- Spectate function ---
     window.spectateRiderById = function(riderId) {
-        if (!window.gameManager) {
-            console.error("Game Manager not exposed. Is breakpoint active?");
-            return;
-        }
-
-        // We use the ID directly as the spectate function expects the athleteId
-        if (!riderId) {
-             console.warn("Cannot spectate: Rider ID is null or undefined.");
-             return;
-        }
-
-        // 1. Find the CLEANED rider object (for logging the name)
+        if (!window.gameManager) return;
+        if (!riderId) return;
         const cleanedRider = window.hackedRiders.find(r => r.riderId == riderId);
-
-        // 2. --- HACK: Identify and call the spectate function ---
-
-        let spectateFn = null;
-        let functionName = 'setFocalRider'; // Start with the strongest candidate
-
-        // We check for the function directly
-        if (typeof window.gameManager[functionName] === 'function') {
-             spectateFn = window.gameManager.setFocalRider;
-        } else {
-            // The brute-force check logic failed before, so we must rely on the user testing candidates.
-            console.error(`❌ Spectate function failed: window.gameManager.${functionName} not found.`);
-            return;
-        }
-
-        // Final Function Call
-        if (typeof spectateFn === 'function') {
-            // Call the function, passing the Rider ID (r.athleteId)
-            spectateFn.call(window.gameManager, riderId);
-            // Log the name from the CLEANED object
-            console.log(`📡 Spectating: ${cleanedRider ? cleanedRider.name : "Unknown Rider"} (ID: ${riderId})`);
+        const fn = window.gameManager.setFocalRider;
+        if (typeof fn === 'function') {
+            fn.call(window.gameManager, riderId);
+            console.log(`📡 Spectating: ${cleanedRider?.name || "Unknown"} (ID: ${riderId})`);
         }
     };
-    // ----------------------------------------------------
 
-    // Function to hide the element
+    // --- Hide original list ---
     function hideOriginalRiderList() {
-        const originalList = document.querySelector('.riders-main');
-        if (originalList) {
-            originalList.style.display = 'none';
-        } else {
-            setTimeout(hideOriginalRiderList, 500);
-        }
+        const original = document.querySelector('.riders-main');
+        if (original) original.style.display = 'none';
+        else setTimeout(hideOriginalRiderList, 500);
     }
     hideOriginalRiderList();
 
-    // --- 1. Create the UI Overlay (using your custom styling) ---
+    // --- HUD Container ---
     const container = document.createElement('div');
     container.style.cssText = `
         position: fixed;
@@ -73,7 +41,7 @@
         right: 8px;
         width: 20vw;
         min-width: 350px;
-        background: rgba(0, 0, 0, 0.5);
+        background: rgba(0,0,0,0.5);
         color: #00ffcc;
         font-family: "Overpass", sans-serif;
         font-size: 12px;
@@ -83,31 +51,33 @@
         max-height: 65vh;
         overflow-y: auto;
     `;
-
-    // UPDATED TABLE HEADERS
     container.innerHTML = `
-        <span id="status-light" style="color: red; text-align: right;">●</span>
-        <table style="width: 100%; border-collapse: collapse;">
+        <span id="status-light" style="color:red;">●</span>
+        <table style="width:100%; border-collapse:collapse;">
             <thead>
-                <tr style="text-align: left; color: #fff;">
-                    <th style="padding: 2px;">Name</th>
-                    <th style="padding: 2px;">Power</th>
-                    <th style="padding: 2px;">Speed</th>
-                    <th style="padding: 2px;">W/kg</th>
-                    <th style="padding: 2px;">Gap</th>
-                    <th style="padding: 2px;">Dist</th>
+                <tr style="text-align:left; color:#fff;">
+                    <th>Name</th>
+                    <th>Power</th>
+                    <th>Speed</th>
+                    <th>W/kg</th>
+                    <th>Gap</th>
+                    <th>Dist</th>
+                    <th>Lap</th>
                 </tr>
             </thead>
             <tbody id="rider-table-body">
-                <tr><td colspan="4" style="text-align: center; color: #888; padding: 10px;">Waiting for breakpoint...</td></tr>
+                <tr><td colspan="7" style="text-align:center; color:#888;">Waiting for breakpoint...</td></tr>
             </tbody>
         </table>
     `;
     document.body.appendChild(container);
 
-    // --- 2. The Scanner Logic ---
     const tbody = document.getElementById('rider-table-body');
     const statusLight = document.getElementById('status-light');
+
+    // --- Lap tracking ---
+    window.__lapTracker = window.__lapTracker || {};
+    const LAP_THRESHOLD = 1000; // distance drop to detect lap reset
 
     setInterval(() => {
         if (!window.hackedRiders) {
@@ -118,58 +88,80 @@
 
         let riders = [...window.hackedRiders];
 
-        // Sort by Distance (Highest first)
-        if (riders.length > 1) {
-            riders.sort((a, b) => b.dist - a.dist);
-        }
+        // Update laps dynamically
+        let leaderLap = 0;
+        riders.forEach(r => {
+            const dist = r.dist;
+            const id = r.riderId;
 
-        statusLight.innerText = `●`;
+            if (!window.__lapTracker[id]) {
+                window.__lapTracker[id] = { lap: 1, lastDist: dist };
+            }
+
+            const tracker = window.__lapTracker[id];
+
+            if (dist < tracker.lastDist - LAP_THRESHOLD) {
+                tracker.lap++;
+            }
+
+            tracker.lastDist = dist;
+            r.lap = tracker.lap;
+            r.lapDistance = dist >= 0 ? dist : (tracker.lastDist + dist + LAP_THRESHOLD);
+
+            if (tracker.lap > leaderLap) leaderLap = tracker.lap;
+        });
+
+        // Sort by lap DESC, lapDistance DESC
+        riders.sort((a, b) => {
+            if (b.lap !== a.lap) return b.lap - a.lap;
+            return b.lapDistance - a.lapDistance;
+        });
+
+        statusLight.innerText = "●";
         statusLight.style.color = "#00ff00";
 
+        // --- Build table ---
         let html = '';
         riders.forEach(r => {
             const name = r.name || "Unknown";
-            const dist = r.dist.toFixed(2);
+            const dist = r.lapDistance.toFixed(2);
             const speed = (r.speed * 3.6).toFixed(1);
             const power = Math.round(r.power);
-
             const wkg = r.wkg.toFixed(1);
-            let gap = r.distanceFromMe;
-            let gapText;
 
-            // Format Gap Text
-            if (gap === 0) {
-                gapText = "0m";
-            } else if (gap > 0) {
-                gapText = `+${Math.round(gap)}m`; // Ahead
-            } else {
-                gapText = `${Math.round(gap)}m`; // Behind
+            // Compute Gap
+            let gapText;
+            if (r.lap < leaderLap) gapText = `+${leaderLap - r.lap} Lap${leaderLap - r.lap > 1 ? "s" : ""}`;
+            else {
+                const gapMeters = r.lapDistance - riders[0].lapDistance;
+                if (gapMeters === 0) gapText = "0m";
+                else gapText = `${Math.round(gapMeters)}m`;
             }
 
-            // Color code W/kg (W/kg > 5 is red, W/kg > 3.5 is yellow)
+            // Color W/kg
             let wkgColor = '#fff';
             if (r.wkg >= 10.0) wkgColor = '#ff4444';
             else if (r.wkg >= 3.5) wkgColor = '#ffcc00';
 
-            // Highlight row if it is YOU
             const rowStyle = r.isMe
-                ? "border-bottom: 1px solid #333; background: rgba(255, 98, 98, 0.8); cursor: default;"
-                : "border-bottom: 1px solid #333; cursor: pointer;";
+                ? "border-bottom:1px solid #333; background:rgba(255,98,98,0.8); cursor:default;"
+                : "border-bottom:1px solid #333; cursor:pointer;";
 
-            // --- CRITICAL: ADD ONCLICK HANDLER AND PASS RIDER ID ---
             html += `
                 <tr style="${rowStyle}" onclick="window.spectateRiderById(${r.riderId || 0})">
-                    <td style="padding: 4px; color: #fff;">${name}</td>
-                    <td style="padding: 4px;color: #fff; font-family: Overpass Mono, monospace;">${power}</td>
-                    <td style="padding: 4px;color: #fff;font-family: Overpass Mono, monospace;">${speed}</td>
-                    <td style="padding: 4px; color: ${wkgColor}; font-weight: bold;font-family: Overpass Mono, monospace;">${wkg}</td>
-                    <td style="padding: 4px;color: #fff;font-family: Overpass Mono, monospace;">${gapText}</td>
-                    <td style="padding: 4px;color: #fff;font-family: Overpass Mono, monospace;">${dist}m</td>
+                    <td style="padding:4px; color:#fff;">${name}</td>
+                    <td style="padding:4px;color:#fff; font-family:Overpass Mono, monospace;">${power}</td>
+                    <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;">${speed}</td>
+                    <td style="padding:4px;color:${wkgColor}; font-weight:bold; font-family:Overpass Mono, monospace;">${wkg}</td>
+                    <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;">${gapText}</td>
+                    <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;">${dist}</td>
+                    <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;">${r.lap}</td>
                 </tr>
             `;
         });
+
         tbody.innerHTML = html;
 
-    }, 1000); // 1-second update
+    }, 500);
 
 })();
