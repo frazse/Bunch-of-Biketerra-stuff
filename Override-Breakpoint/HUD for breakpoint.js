@@ -12,6 +12,9 @@
 
 (function() {
     'use strict';
+// ===== USER CONFIG =====
+const LOCAL_RIDER_NAME = "SET-YOUR-Name";   // <-- Change this to anything you want
+// =======================
 
 // --- Global Function to Handle Spectate Click ---
 // Default NO-OP so /ride pages never throw errors
@@ -156,7 +159,7 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
         const currentLeaderDist = riders[0]?.lapDistance || 0;
 
         riders.forEach(r => {
-            const name = r.name || "Unknown";
+            const name = r.isMe ? LOCAL_RIDER_NAME : (r.name || "Unknown");
             const dist = r.lapDistance.toFixed(2);
             const speed = (r.speed * 3.6).toFixed(1);
             const power = Math.round(r.power);
@@ -210,13 +213,16 @@ if (helmetColor.startsWith('#') && helmetColor.length === 7) {
     const bC = parseInt(helmetColor.slice(5,7),16);
     bgColor = `rgba(${rC},${gC},${bC},0.6)`;
 }
-            
+
+
+
             const rowStyle = `
                 border-bottom:1px solid #333;
                 background:${bgColor};
                 cursor:${r.isMe ? "default" : "pointer"};
             `;
-            
+
+
             html += `
                 <tr style="${rowStyle}" onclick="window.spectateRiderById(${r.riderId || 0})">
                     <td style="padding:4px; color:#fff;text-shadow: 1px 1px 4px #000">${name}</td>
