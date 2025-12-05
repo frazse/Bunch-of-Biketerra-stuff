@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Biketerra LeaderOverlay v1.6 (Multi Rider)
+// @name         Biketerra Elevation Graph Multi Rider
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.0
 // @description  Shows marker for every rider on elevation graph (exact positions) + settings
 // @author       Josef
 // @match        https://biketerra.com/ride*
@@ -32,38 +32,56 @@
     // ============================
     // OVERLAY
     // ============================
-    function createOverlay() {
-        if (overlay) return overlay;
+function createOverlay() {
+    if (overlay) return overlay;
 
-        overlay = document.createElement('div');
-        overlay.id = 'leaderOverlay';
-        Object.assign(overlay.style, {
-            position: 'fixed',
-            bottom: '8px',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            width: '50vw',
-            height: '95px',
-            background: 'rgba(0,0,0,0.0)',
-            zIndex: '9999',
-            borderRadius: '6px',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            overflow: 'hidden'
-        });
-        document.body.appendChild(overlay);
+    overlay = document.createElement('div');
+    overlay.id = 'leaderOverlay';
+    Object.assign(overlay.style, {
+        position: 'absolute', // must be absolute to overlay the graph
+        background: 'rgba(0,0,0,0.0)',
+        zIndex: '9999',
+        overflow: 'hidden',
+        pointerEvents: 'none' // so clicks go through
+    });
+    document.body.appendChild(overlay);
 
+    // SVG Graph
+    svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("height", "100%");
+    overlay.appendChild(svg);
 
-        // SVG Graph
-        svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-        svg.setAttribute("width", "100%");
-        svg.setAttribute("height", "80%");
-        overlay.appendChild(svg);
+    // Set size & position to match .elev-graph
+    updateOverlayPosition();
 
-        return overlay;
-    }
+    return overlay;
+}
+function updateOverlayPosition() {
+    const elevGraph = document.querySelector('.elev-graph');
+    if (!elevGraph || !overlay) return false; // return false if not ready
+
+    const rect = elevGraph.getBoundingClientRect();
+
+    overlay.style.top = rect.top + 'px';
+    overlay.style.left = rect.left + 'px';
+    overlay.style.width = rect.width + 'px';
+    overlay.style.height = rect.height + 'px';
+    return true;
+}
+
+// Poll until .elev-graph exists
+function waitForElevGraph(callback) {
+    const interval = setInterval(() => {
+        if (updateOverlayPosition()) {
+            clearInterval(interval);
+            if (callback) callback();
+        }
+    }, 100); // check every 100ms
+}
+
+waitForElevGraph();
+window.addEventListener('resize', updateOverlayPosition);
 
     // ============================
     // READ EVERY RIDER POSITION
@@ -134,8 +152,9 @@ function autoDetectRouteLength() {
         createOverlay();
         if (!routeLength) return;
 
-        const width = overlay.getBoundingClientRect().width || 1;
-        const height = overlay.clientHeight * 0.8;
+const width = overlay.getBoundingClientRect().width || 1;
+const height = overlay.getBoundingClientRect().height || 1; // use full height
+
 
 const riders = getRidersPositions();
         if (riders.length === 0) return;
