@@ -13,35 +13,46 @@
 (function() {
     'use strict';
 
-    // --- Spectate function ---
-    window.spectateRiderById = function(riderId) {
-        // Only run if the URL contains '/spectate' AND gameManager is exposed
-        if (!window.location.href.includes('/spectate') || !window.gameManager) {
-             // We do nothing if not in spectate mode or if the data source is missing
-             return;
-        }
+// --- Global Function to Handle Spectate Click ---
+// Default NO-OP so /ride pages never throw errors
+window.spectateRiderById = function(riderId) {
+    console.warn("Spectate disabled on non-spectate pages.");
+};
 
-        if (!riderId || riderId === 0) {
-            console.warn("Spectate failed: Invalid or null Rider ID.");
+// ONLY override on /spectate pages
+if (location.href.startsWith("https://biketerra.com/spectate")) {
+    window.spectateRiderById = function(riderId) {
+        if (!window.gameManager) {
+            console.error("Game Manager not exposed. Is breakpoint active?");
             return;
         }
-
+        // We use the ID directly as the spectate function expects the athleteId
+        if (!riderId) {
+             console.warn("Cannot spectate: Rider ID is null or undefined.");
+             return;
+        }
+        // 1. Find the CLEANED rider object (for logging the name)
         const cleanedRider = window.hackedRiders.find(r => r.riderId == riderId);
-
-        // --- FINAL FUNCTION CALL ---
-        // We use the most probable minified function: 'B' (which takes the ID).
-        const spectateFn = window.gameManager.B;
-
+        // 2. --- HACK: Identify and call the spectate function ---
+        let spectateFn = null;
+        let functionName = 'setFocalRider'; // Start with the strongest candidate
+        // We check for the function directly
+        if (typeof window.gameManager[functionName] === 'function') {
+             spectateFn = window.gameManager.setFocalRider;
+        } else {
+            // The brute-force check logic failed before, so we must rely on the user testing candidates.
+            console.error(`❌ Spectate function failed: window.gameManager.${functionName} not found.`);
+            return;
+        }
+        // Final Function Call
         if (typeof spectateFn === 'function') {
             // Call the function, passing the Rider ID (r.athleteId)
             spectateFn.call(window.gameManager, riderId);
-            console.log(`📡 Spectating: ${cleanedRider?.name || "Unknown"} (ID: ${riderId})`);
-        } else {
-            // This is the error message if 'B' is the wrong letter
-            console.error("❌ Spectate function (B) not found. Check console for correct letter.");
+            // Log the name from the CLEANED object
+            console.log(`📡 Spectating: ${cleanedRider ? cleanedRider.name : "Unknown Rider"} (ID: ${riderId})`);
         }
     };
-
+}
     // --- Hide original list ---
     function hideOriginalRiderList() {
         // Hides the element that contains the original rider list
@@ -199,16 +210,13 @@ if (helmetColor.startsWith('#') && helmetColor.length === 7) {
     const bC = parseInt(helmetColor.slice(5,7),16);
     bgColor = `rgba(${rC},${gC},${bC},0.6)`;
 }
-
-
-
+            
             const rowStyle = `
                 border-bottom:1px solid #333;
                 background:${bgColor};
                 cursor:${r.isMe ? "default" : "pointer"};
             `;
-
-
+            
             html += `
                 <tr style="${rowStyle}" onclick="window.spectateRiderById(${r.riderId || 0})">
                     <td style="padding:4px; color:#fff;text-shadow: 1px 1px 4px #000">${name}</td>
