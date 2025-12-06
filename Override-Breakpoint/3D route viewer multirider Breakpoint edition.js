@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra 3D Route Viewer + Multi Rider Absolute Edition
 // @namespace    http://tampermonkey.net/
-// @version      1.3
-// @description  3D route viewer with elevation + live rider markers (Absolute Path Logic)
+// @version      1.5
+// @description  3D viewer. Fixed: Correctly looks up FocalRider in humans list to determine Path ID (A/B direction).
 // @author       Josef/chatgpt
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate/*
@@ -235,16 +235,30 @@
         const marker = BABYLON.MeshBuilder.CreateSphere("marker",{ diameter: 0.1 },scene);
         marker.isVisible = true;
 
-        // --- Get MY helmet color ---
-        let myHelmetColor = "#ffffff";
-        if (window.gameManager?.humans) {
-            for (const h of Object.values(window.gameManager.humans)) {
-                if (h.isMe || h.athleteId === window.myRiderId) {
-                    myHelmetColor = h.config?.design?.helmet_color || myHelmetColor;
-                    break;
-                }
+        // --- Get MAIN MARKER helmet color (Ego or Spectated) ---
+        let myHelmetColor = "#ffffff"; // Default white
+        const gm = window.gameManager;
+        const humans = gm?.humans || {};
+        const ego = gm?.ego;
+        const focalRider = gm?.focalRider;
+
+        // 1. Try EGO (You are riding)
+        if (ego) {
+             myHelmetColor = ego?.entity?.design?.helmet_color
+                          || ego?.config?.design?.helmet_color
+                          || ego?.helmet_color
+                          || myHelmetColor;
+        }
+        // 2. Try FOCAL RIDER (You are spectating)
+        else if (focalRider) {
+            const focalId = focalRider.athleteId || focalRider.id;
+            const targetHuman = humans[focalId] || Object.values(humans).find(h => (h.athleteId || h.id) == focalId);
+
+            if (targetHuman) {
+                 myHelmetColor = targetHuman?.config?.design?.helmet_color || myHelmetColor;
             }
         }
+
         let myColor = new BABYLON.Color3(1, 1, 1);
         if (myHelmetColor && myHelmetColor.startsWith("#")) {
             const rr = parseInt(myHelmetColor.slice(1, 3), 16) / 255;
@@ -288,12 +302,33 @@
 
             let targetDist = pct * totalDist;
 
-            // ABSOLUTE CHECK: Are YOU on Path B (ID 1)?
-            const egoPathId = window.gameManager?.ego?.currentPath?.id;
-            if (egoPathId === 1) {
-                // If you are on Path B, your progress bar (0-100%) represents moving BACKWARDS on the map
+            // --- FIXED PATH LOGIC ---
+            // Determine the "Active Subject" (Ego OR Focal Rider)
+            // Then check THEIR path ID to see if we need to reverse the distance.
+            const gm = window.gameManager;
+            let activePathId = 0;
+
+            if (gm?.ego) {
+                // Easy case: We are riding
+                activePathId = gm.ego.currentPath?.id;
+            } else if (gm?.focalRider) {
+                // Hard case: Spectating. FocalRider object is incomplete.
+                // We must find the REAL human object using the focalRider's ID.
+                const fId = gm.focalRider.athleteId || gm.focalRider.id;
+
+                // Lookup in the humans list
+                const targetHuman = gm.humans?.[fId] || Object.values(gm.humans||{}).find(h => (h.athleteId||h.id) == fId);
+
+                if (targetHuman) {
+                    activePathId = targetHuman.currentPath?.id;
+                }
+            }
+
+            // Path ID 1 = Path B (Going Backwards)
+            if (activePathId === 1) {
                 targetDist = totalDist - targetDist;
             }
+            // ------------------------
 
             const i = findSegmentIndexByDist(targetDist);
             const segStart=cum[i], segEnd=cum[i+1], segLen=segEnd-segStart||1;
@@ -312,13 +347,21 @@
             const results = [];
             if (!window.hackedRiders || !window.gameManager?.humans) return results;
 
-            const myRider = window.hackedRiders.find(r => r.isMe);
-            if (!myRider || !distanceKm) return results;
+            // Note: In spectate mode, everyone is "not me", so we process everyone.
+            // But we don't want to draw a duplicate dot for the Focal Rider if the Arrow is already tracking them.
+            // Let's filter out the currently watched rider from the "extra dots" list.
+            const focalId = window.gameManager.focalRider?.athleteId || window.gameManager.focalRider?.id;
+            const myId = window.gameManager.ego?.athleteId; // or undefined
+
+            const idToExclude = myId || focalId; // If riding, exclude me. If spectating, exclude watched.
+
+            if (!distanceKm) return results;
 
             const gmHumans = window.gameManager.humans;
 
             window.hackedRiders.forEach(r => {
-                if (r.isMe) return;
+                // Skip the rider who is already represented by the main "Arrow/Marker"
+                if (r.riderId == idToExclude) return;
 
                 // 1. Get Human Object
                 let targetHuman = gmHumans[r.riderId];
@@ -338,7 +381,7 @@
                 // 3. ABSOLUTE DIRECTION LOGIC
                 // Path ID 1 = Path B (Going Backwards)
                 if (targetHuman && targetHuman.currentPath && targetHuman.currentPath.id === 1) {
-                     wrappedKm = distanceKm - wrappedKm;
+                      wrappedKm = distanceKm - wrappedKm;
                 }
 
                 // Color
