@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra Elevation Graph Multi Rider
 // @namespace    http://tampermonkey.net/
-// @version      1.2
-// @description  Shows marker for every rider on elevation graph. Spectator compatible.
+// @version      2.0
+// @description  FIXED: Removed redundant absolute speed flip. Speed is now only negated when the rider's path opposes the graph's visible path.
 // @author       Josef
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate/*
@@ -13,24 +13,28 @@
 
 (function () {
     'use strict';
-    console.log("[LeaderOverlay v1.2] Script started");
+    console.log("[LeaderOverlay v2.0] Script started with streamlined speed logic.");
 
     const checkInterval = 500;
     let autoDetect = true;
-    let routeLength = 0;
+    let routeLength = 0; // Stored in KM for logging/fallback
     let overlay;
     let svg = null;
-    let riderLines = new Map(); // name → SVG line
+    // name → {line: SVG line, lastUpdateTime: number, lastKnownDist: number, speed: number}
+    let riderLines = new Map();
 
     // ============================
     // OVERLAY
     // ============================
     function createOverlay() {
-        // 1. Find the target graph element
         const elevGraph = document.querySelector('.elev-graph');
         if (!elevGraph) return null;
 
-        // 2. Garbage Collection
+        const pathSVG = elevGraph.querySelector('svg.pathSVG');
+        if (!pathSVG) return null;
+
+        svg = pathSVG;
+
         if (overlay && !document.body.contains(overlay)) {
             overlay = null;
             riderLines.clear();
@@ -38,43 +42,28 @@
 
         if (overlay) return overlay;
 
-        // 3. Create the overlay
         overlay = document.createElement('div');
         overlay.id = 'leaderOverlay';
 
-        // 4. CSS relative to the parent
         Object.assign(overlay.style, {
-            position: 'absolute',
-            top: '0',
-            left: '0',
-            width: '100%',
-            height: '100%',
-            background: 'rgba(0,0,0,0.0)',
-            zIndex: '9999',
-            overflow: 'hidden',
-            pointerEvents: 'none' // so clicks go through
+            position: 'absolute', top: '0', left: '0', width: '100%', height: '100%',
+            background: 'rgba(0,0,0,0.0)', zIndex: '9999', overflow: 'hidden',
+            pointerEvents: 'none'
         });
 
-        // 5. SVG Graph
-        svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-        svg.setAttribute("width", "100%");
-        svg.setAttribute("height", "100%");
-        svg.style.display = "block";
-        overlay.appendChild(svg);
+        const lineSVG = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        lineSVG.setAttribute("width", "100%");
+        lineSVG.setAttribute("height", "100%");
+        lineSVG.style.display = "block";
+        lineSVG.setAttribute("preserveAspectRatio", "none");
+        overlay.appendChild(lineSVG);
+        overlay.lineSVG = lineSVG;
 
-        // 6. Append DIRECTLY to the graph container
-        if (elevGraph.tagName === 'CANVAS') {
-            const parent = elevGraph.parentElement;
-            if (getComputedStyle(parent).position === 'static') {
-                parent.style.position = 'relative';
-            }
-            parent.appendChild(overlay);
-        } else {
-            if (getComputedStyle(elevGraph).position === 'static') {
-                elevGraph.style.position = 'relative';
-            }
-            elevGraph.appendChild(elevGraph);
+        const parent = elevGraph.parentElement;
+        if (getComputedStyle(parent).position === 'static') {
+            parent.style.position = 'relative';
         }
+        parent.appendChild(overlay);
 
         return overlay;
     }
@@ -98,37 +87,26 @@
 
         const gm = window.gameManager;
         const gmHumans = gm.humans;
+        let subjectPathId = 0;
 
-        // --- DETERMINE THE "SUBJECT" PATH ID ---
-        // (This determines if we need to flip the graph for riders going backwards)
-        let subjectPathId = 0; // Default to 0 (Forward)
-
+        // 1. Determine Subject Path ID (0 or 1)
         if (gm.ego) {
-            // Case 1: Riding
             subjectPathId = gm.ego.currentPath?.id;
         } else if (gm.focalRider) {
-            // Case 2: Spectating - Look up the focal rider
             const fId = gm.focalRider.athleteId || gm.focalRider.id;
             const focalHuman = gmHumans[fId] || Object.values(gmHumans).find(h => (h.athleteId||h.id) == fId);
             if (focalHuman) {
                 subjectPathId = focalHuman.currentPath?.id;
             }
         }
-        // ---------------------------------------
 
+        const fallbackPathMeters = routeLength * 1000;
         const positions = [];
 
         window.hackedRiders.forEach(r => {
-            // If I am riding, skip "Me" (the game usually draws the main cursor already)
-            // If Spectating, we might want to draw everyone, but usually the game draws a cursor for the watched rider too.
-            // For now, let's skip the rider if r.isMe is true (which only happens when riding).
-            if (r.isMe) return;
+            // Skip the rider being controlled by the main game cursor
+            if (r.isMe || r.riderId === gm.ego?.athleteId || r.riderId === gm.focalRider?.athleteId) return;
 
-            // 1. Calculate standard percentage (0 to 100)
-            if (!routeLength) return;
-            let percent = ((r.dist / 1000) % routeLength) / routeLength * 100;
-
-            // 2. Find the specific human object
             let targetHuman = gmHumans[r.riderId];
             if (!targetHuman) {
                 for (const h of Object.values(gmHumans)) {
@@ -139,19 +117,36 @@
                 }
             }
 
-            // 3. Direction Check (Relative to the SUBJECT)
-            // If the SUBJECT is on Path B (going backwards relative to map), the graph is flipped.
-            // We need to make sure the dots align with the graph currently on screen.
-            if (targetHuman && targetHuman.currentPath && subjectPathId !== undefined) {
-                const riderPathId = targetHuman.currentPath.id;
-
-                // If the rider is on a DIFFERENT path than the one being viewed, flip the percentage
-                if (riderPathId !== subjectPathId) {
-                    percent = 100 - percent;
-                }
+            let riderPathMeters = fallbackPathMeters;
+            let riderPathId = 0;
+            if (targetHuman?.currentPath) {
+                riderPathMeters = targetHuman.currentPath.distance || fallbackPathMeters;
+                riderPathId = targetHuman.currentPath.id;
             }
+            if (riderPathMeters === 0) return;
 
-            // 4. Helmet color lookup
+            // Calculate current distance into the lap (r.dist is cumulative meters)
+            let distInMeters = (r.dist) % riderPathMeters;
+
+            // Normalize speed to the path length (m/s to percentage/s). Speed is initially POSITIVE.
+            let speedNormalized = r.speed / riderPathMeters;
+
+            // --- Apply Direction/Flipping Logic ---
+
+            // If the rider's path is DIFFERENT from the subject's path, we must FLIP everything visually.
+            if (riderPathId !== subjectPathId) {
+                // 1. Flip position: e.g., if rider is at 80% on Path A, they appear at 20% on Path B view.
+                const percent = distInMeters / riderPathMeters;
+                distInMeters = (1.0 - percent) * riderPathMeters;
+
+                // 2. Flip speed: The prediction must move the marker backward on the visible profile.
+                speedNormalized = -speedNormalized;
+            }
+            // --- End Direction/Flipping Logic ---
+
+            // Normalize final position to the 0.0 to 1.0 range
+            const rawPercent = distInMeters / riderPathMeters;
+
             let helmetColor = "#ffffff";
             if (targetHuman?.config?.design?.helmet_color) {
                 helmetColor = targetHuman.config.design.helmet_color;
@@ -159,10 +154,9 @@
 
             positions.push({
                 name: r.name || String(r.riderId),
-                percent,
+                percent: rawPercent, // Value is 0.0 to 1.0 (Full route coordinate)
+                speed: speedNormalized, // Value is percentage/second, sign-adjusted for display
                 helmetColor,
-                isYou: r.isMe,
-                isLeader: r.isLeader || false
             });
         });
 
@@ -176,7 +170,6 @@
         if (!autoDetect) return;
         const gm = window.gameManager;
 
-        // Try Ego first, then Spectated Rider
         let currentPath = gm?.ego?.currentPath;
 
         if (!currentPath && gm?.focalRider) {
@@ -192,7 +185,6 @@
         const km = meters / 1000;
         if (Math.abs(routeLength - km) > 0.001) {
             routeLength = km;
-            console.log("[LeaderOverlay] Route length auto-detected:", km, "km");
         }
     }
 
@@ -201,46 +193,98 @@
     // ============================
     function updateOverlay() {
         const ov = createOverlay();
-        if (!ov || !routeLength) return;
+        if (!ov || !svg) return;
 
-        // Use getBoundingClientRect only to get the current drawing width for scaling
-        const width = ov.getBoundingClientRect().width || 1;
-        const height = ov.getBoundingClientRect().height || 1;
+        autoDetectRouteLength();
+        if (routeLength === 0) return;
 
-        const riders = getRidersPositions();
-        // Removed: if (riders.length === 0) return;  <-- We want to clear lines if no riders are found
+        const ridersRaw = getRidersPositions();
+        const now = performance.now();
+
+        // --- SYNCHRONIZATION STEP ---
+        const viewBox = svg.getAttribute("viewBox");
+        ov.lineSVG.setAttribute("viewBox", viewBox);
+
+        const parts = viewBox.split(' ').map(Number);
+        const minX = parts[0];
+        const viewWidth = parts[2];
+        const strokeWidth = viewWidth * 0.005;
+
+        const activeRiders = new Set(ridersRaw.map(r => r.name));
 
         // Cleanup old lines
-        riderLines.forEach((line, name) => {
-            if (!riders.find(r => r.name === name)) {
-                line.remove();
+        riderLines.forEach((entry, name) => {
+            if (!activeRiders.has(name)) {
+                entry.line.remove();
                 riderLines.delete(name);
             }
         });
 
-        // Draw new lines
-        riders.forEach(r => {
-            let line = riderLines.get(r.name);
-            if (!line) {
-                line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-                svg.appendChild(line);
-                riderLines.set(r.name, line);
+        // Update state and Draw lines
+        ridersRaw.forEach(r => {
+            let entry = riderLines.get(r.name);
+
+            // 1. Initialization/State Update
+            if (!entry) {
+                // New Rider Init
+                const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+                ov.lineSVG.appendChild(line);
+                line.setAttribute("y1", 0);
+                line.setAttribute("y2", 1);
+
+                entry = {
+                    line,
+                    lastUpdateTime: now,
+                    lastKnownDist: r.percent,
+                    speed: r.speed
+                };
+                riderLines.set(r.name, entry);
+            } else if (Math.abs(entry.lastKnownDist - r.percent) > 0.0001) {
+                // Position Update (if new data is significantly different)
+                entry.lastUpdateTime = now;
+                entry.lastKnownDist = r.percent;
+                entry.speed = r.speed;
             }
 
-            const x = (r.percent / 100) * width;
+            // 2. Physics Prediction
+            const dt = (now - entry.lastUpdateTime) / 1000;
 
-            line.setAttribute("x1", x);
-            line.setAttribute("x2", x);
-            line.setAttribute("y1", 0);
-            line.setAttribute("y2", height);
-            line.setAttribute("stroke-width", 2);
-            line.setAttribute("stroke", (r.helmetColor && r.helmetColor.startsWith("#")) ? r.helmetColor : "white");
+            // Predict the new absolute position (0.0 to 1.0)
+            let predictedPos = entry.lastKnownDist + (entry.speed * dt);
+
+            // Clamp position to stay within a single lap (0.0 to 1.0)
+            if (predictedPos > 1.0) predictedPos = predictedPos % 1.0;
+            if (predictedPos < 0.0) predictedPos = 1.0 + predictedPos;
+
+            // 3. Visibility and Drawing
+
+            // Calculate position relative to the start of the visible view (minX)
+            const positionRelativeToViewStart = predictedPos - minX;
+
+            // Normalized position to the view's width (0.0 = left edge, 1.0 = right edge)
+            const normalizedRelativePosition = positionRelativeToViewStart / viewWidth;
+
+            // Check if marker is outside the view (slightly padded)
+            if (normalizedRelativePosition < -0.05 || normalizedRelativePosition > 1.05) {
+                entry.line.style.display = 'none';
+                return;
+            }
+
+            // The X coordinate is the absolute position (0.0 to 1.0) on the full route.
+            const xAbsolute = predictedPos;
+
+            entry.line.style.display = 'block';
+
+            entry.line.setAttribute("x1", xAbsolute);
+            entry.line.setAttribute("x2", xAbsolute);
+            entry.line.setAttribute("stroke-width", strokeWidth);
+            entry.line.setAttribute("stroke", (r.helmetColor && r.helmetColor.startsWith("#")) ? r.helmetColor : "white");
         });
     }
 
+    // Set the refresh rate faster for smoother movement
     setInterval(() => {
-        autoDetectRouteLength();
         updateOverlay();
-    }, checkInterval);
+    }, 1000 / 60); // Aiming for ~60 FPS update rate
 
 })();
