@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra Elevation Graph Multi Rider
 // @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  Shows marker for every rider on elevation graph (exact positions)
+// @version      1.2
+// @description  Shows marker for every rider on elevation graph. Spectator compatible.
 // @author       Josef
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate/*
@@ -13,7 +13,7 @@
 
 (function () {
     'use strict';
-    console.log("[LeaderOverlay v1.7] Script started");
+    console.log("[LeaderOverlay v1.2] Script started");
 
     const checkInterval = 500;
     let autoDetect = true;
@@ -30,7 +30,7 @@
         const elevGraph = document.querySelector('.elev-graph');
         if (!elevGraph) return null;
 
-        // 2. Garbage Collection: If overlay exists in memory but fell off the DOM (e.g. React re-render), clear it
+        // 2. Garbage Collection
         if (overlay && !document.body.contains(overlay)) {
             overlay = null;
             riderLines.clear();
@@ -42,7 +42,7 @@
         overlay = document.createElement('div');
         overlay.id = 'leaderOverlay';
 
-        // 4. CRITICAL FIX: CSS relative to the parent, not the viewport
+        // 4. CSS relative to the parent
         Object.assign(overlay.style, {
             position: 'absolute',
             top: '0',
@@ -59,11 +59,10 @@
         svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
         svg.setAttribute("width", "100%");
         svg.setAttribute("height", "100%");
-        svg.style.display = "block"; // prevents tiny scrollbars
+        svg.style.display = "block";
         overlay.appendChild(svg);
 
-        // 6. CRITICAL FIX: Append DIRECTLY to the graph container (or its parent if it's a canvas)
-        // This ensures the overlay physically moves with the graph during resize.
+        // 6. Append DIRECTLY to the graph container
         if (elevGraph.tagName === 'CANVAS') {
             const parent = elevGraph.parentElement;
             if (getComputedStyle(parent).position === 'static') {
@@ -74,13 +73,12 @@
             if (getComputedStyle(elevGraph).position === 'static') {
                 elevGraph.style.position = 'relative';
             }
-            elevGraph.appendChild(overlay);
+            elevGraph.appendChild(elevGraph);
         }
 
         return overlay;
     }
 
-    // We no longer need to calculate 'rect' manually because CSS 'width: 100%' handles it.
     function waitForElevGraph() {
         const interval = setInterval(() => {
             if (document.querySelector('.elev-graph')) {
@@ -96,20 +94,38 @@
     // READ EVERY RIDER POSITION
     // ============================
     function getRidersPositions() {
-        if (!window.hackedRiders || !window.gameManager?.humans || !window.gameManager?.ego) return [];
+        if (!window.hackedRiders || !window.gameManager?.humans) return [];
 
-        const gmHumans = window.gameManager.humans;
-        const egoPathId = window.gameManager.ego.currentPath?.id;
-        const myRider = window.hackedRiders.find(r => r.isMe);
+        const gm = window.gameManager;
+        const gmHumans = gm.humans;
 
-        if (!myRider) return [];
+        // --- DETERMINE THE "SUBJECT" PATH ID ---
+        // (This determines if we need to flip the graph for riders going backwards)
+        let subjectPathId = 0; // Default to 0 (Forward)
+
+        if (gm.ego) {
+            // Case 1: Riding
+            subjectPathId = gm.ego.currentPath?.id;
+        } else if (gm.focalRider) {
+            // Case 2: Spectating - Look up the focal rider
+            const fId = gm.focalRider.athleteId || gm.focalRider.id;
+            const focalHuman = gmHumans[fId] || Object.values(gmHumans).find(h => (h.athleteId||h.id) == fId);
+            if (focalHuman) {
+                subjectPathId = focalHuman.currentPath?.id;
+            }
+        }
+        // ---------------------------------------
 
         const positions = [];
 
         window.hackedRiders.forEach(r => {
+            // If I am riding, skip "Me" (the game usually draws the main cursor already)
+            // If Spectating, we might want to draw everyone, but usually the game draws a cursor for the watched rider too.
+            // For now, let's skip the rider if r.isMe is true (which only happens when riding).
             if (r.isMe) return;
 
             // 1. Calculate standard percentage (0 to 100)
+            if (!routeLength) return;
             let percent = ((r.dist / 1000) % routeLength) / routeLength * 100;
 
             // 2. Find the specific human object
@@ -123,10 +139,14 @@
                 }
             }
 
-            // 3. Direction Check
-            if (targetHuman && targetHuman.currentPath && egoPathId !== undefined) {
+            // 3. Direction Check (Relative to the SUBJECT)
+            // If the SUBJECT is on Path B (going backwards relative to map), the graph is flipped.
+            // We need to make sure the dots align with the graph currently on screen.
+            if (targetHuman && targetHuman.currentPath && subjectPathId !== undefined) {
                 const riderPathId = targetHuman.currentPath.id;
-                if (riderPathId !== egoPathId) {
+
+                // If the rider is on a DIFFERENT path than the one being viewed, flip the percentage
+                if (riderPathId !== subjectPathId) {
                     percent = 100 - percent;
                 }
             }
@@ -154,8 +174,21 @@
     // ============================
     function autoDetectRouteLength() {
         if (!autoDetect) return;
-        const meters = window.gameManager?.ego?.currentPath?.distance;
+        const gm = window.gameManager;
+
+        // Try Ego first, then Spectated Rider
+        let currentPath = gm?.ego?.currentPath;
+
+        if (!currentPath && gm?.focalRider) {
+             const fId = gm.focalRider.athleteId || gm.focalRider.id;
+             const humans = gm.humans || {};
+             const focalHuman = humans[fId] || Object.values(humans).find(h => (h.athleteId||h.id) == fId);
+             if (focalHuman) currentPath = focalHuman.currentPath;
+        }
+
+        const meters = currentPath?.distance;
         if (!meters) return;
+
         const km = meters / 1000;
         if (Math.abs(routeLength - km) > 0.001) {
             routeLength = km;
@@ -175,7 +208,7 @@
         const height = ov.getBoundingClientRect().height || 1;
 
         const riders = getRidersPositions();
-        if (riders.length === 0) return;
+        // Removed: if (riders.length === 0) return;  <-- We want to clear lines if no riders are found
 
         // Cleanup old lines
         riderLines.forEach((line, name) => {
