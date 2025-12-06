@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra 3D Route Viewer + Multi Rider Absolute Edition
 // @namespace    http://tampermonkey.net/
-// @version      1.5
-// @description  3D viewer. Fixed: Correctly looks up FocalRider in humans list to determine Path ID (A/B direction).
+// @version      2.5
+// @description  3D viewer. Fixed: Correctly detects when YOU (Ego) switch paths/turn around.
 // @author       Josef/chatgpt
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate/*
@@ -121,7 +121,7 @@
 
         console.log(`[3D Viewer] Applied 1% real-world scaling`);
 
-        // --- Cumulative distances ---
+        // --- Cumulative distances (3D Units) ---
         const cum = new Array(points.length).fill(0);
         for(let i=1;i<points.length;i++){
             const dx=points[i].x-points[i-1].x;
@@ -131,24 +131,48 @@
         const totalDist = cum[cum.length-1]||1;
         console.log(`[3D Viewer] Scene total distance: ${totalDist.toFixed(2)} units`);
 
-        // --- Get real-world route length from page/fallback ---
-        let distanceKm = null;
-        const routeMain = document.querySelector(".route-main");
-        if (!routeMain) return console.warn("[3D Viewer] Cannot find .route-main");
 
-        const infoDiv = Array.from(routeMain.querySelectorAll("div"))
-        .find(d => d && /km/i.test(d.textContent) && /\//.test(d.textContent));
-        if (!infoDiv) return console.warn("[3D Viewer] Cannot find info div with km / m");
+        // --- MULTI-PATH DISTANCE EXTRACTION (v2.0) ---
+        const pathLengths = new Map();
+        let fallbackDistance = 0;
 
-        const text = infoDiv.textContent.replace(/\s+/g, " ").trim();
-        const match = text.match(/([\d.,]+)\s*km\s*\/\s*([\d.,]+)\s*m/i);
-        if (!match) return console.warn("[3D Viewer] Cannot parse km / m from info div");
+        function extractPathLengths(obj) {
+            if (obj && obj.paths && Array.isArray(obj.paths)) {
+                obj.paths.forEach(p => {
+                    if (p.id !== undefined && p.distance) {
+                        pathLengths.set(p.id, p.distance);
+                    }
+                });
+            }
+            if (obj && obj.pathA && obj.pathA.distance) pathLengths.set(0, obj.pathA.distance);
+            if (obj && obj.pathB && obj.pathB.distance) pathLengths.set(1, obj.pathB.distance);
 
-        distanceKm = parseFloat(match[1].replace(",", "."));
-        const climbM = parseFloat(match[2].replace(",", "."));
-        if (!Number.isFinite(distanceKm) || !Number.isFinite(climbM)) return console.warn("[3D Viewer] Invalid distance or climb");
+            if (pathLengths.size === 0 && typeof obj === 'object' && obj !== null) {
+                for (const k in obj) {
+                    if (obj.hasOwnProperty(k) && typeof obj[k] === 'object') {
+                        extractPathLengths(obj[k]);
+                        if (pathLengths.size > 0) return;
+                    }
+                }
+            }
+        }
+        extractPathLengths(j);
 
-        console.log(`[3D Viewer] Route length: ${distanceKm} km, climb: ${climbM} m`);
+        let gpsMeters = 0;
+        for(let i=1; i<raw.length; i++) {
+             const dx = xVals[i] - xVals[i-1];
+             const dz = zVals[i] - zVals[i-1];
+             gpsMeters += Math.hypot(dx, dz);
+        }
+        fallbackDistance = gpsMeters;
+
+        if (pathLengths.size > 0) {
+            console.log("[3D Viewer] Found Internal Path Lengths:", Object.fromEntries(pathLengths));
+        } else {
+            console.warn("[3D Viewer] Using GPS Fallback Distance:", fallbackDistance);
+        }
+        // ---------------------------------------------
+
 
         // --- Create Canvas + Scene ---
         const canvas=document.createElement("canvas");
@@ -159,24 +183,20 @@
         const scene = new BABYLON.Scene(engine);
         scene.clearColor = new BABYLON.Color4(0,0,0,0.5);
 
-        // --- START & END ROUTE MARKERS (STATIC) ---
+        // --- STATIC MARKERS ---
         const startMarker = BABYLON.MeshBuilder.CreateCylinder("startMarker", { height: 1.2, diameter: 0.10 }, scene);
         const endMarker = BABYLON.MeshBuilder.CreateCylinder("endMarker", { height: 1.2, diameter: 0.10 }, scene);
-
         const startMat = new BABYLON.StandardMaterial("startMat", scene);
-        startMat.emissiveColor = new BABYLON.Color3(0, 1, 0); // green
+        startMat.emissiveColor = new BABYLON.Color3(0, 1, 0);
         startMarker.material = startMat;
-
         const endMat = new BABYLON.StandardMaterial("endMat", scene);
-        endMat.emissiveColor = new BABYLON.Color3(1, 0, 0); // red
+        endMat.emissiveColor = new BABYLON.Color3(1, 0, 0);
         endMarker.material = endMat;
 
-        // Position them (always at 0 and End for static map)
         if(points.length > 0) {
             startMarker.position.x = points[0].x;
             startMarker.position.z = points[0].z;
             startMarker.position.y = points[0].y + 0.6;
-
             endMarker.position.x = points[points.length-1].x;
             endMarker.position.z = points[points.length-1].z;
             endMarker.position.y = points[points.length-1].y + 0.6;
@@ -188,12 +208,11 @@
         camera.minZ=0.1; camera.lowerRadiusLimit=0.5; camera.upperRadiusLimit=radius*5; camera.wheelDeltaPercentage=0.05;
         new BABYLON.HemisphericLight("light",new BABYLON.Vector3(0,1,0),scene);
 
-        // --- Grade Colors Helper ---
+        // --- Visuals: Grade Colors & Fill ---
         const GRADE_COLORS=[{grade:0,color:"#0008"},{grade:1,color:"#FF6262"},{grade:4,color:"#DC5666"},{grade:8,color:"#B14674"},{grade:11,color:"#7F347C"}];
         function hexToC4(hex){ const n=parseInt(hex.slice(1),16); return new BABYLON.Color4((n>>16&255)/255,(n>>8&255)/255,(n&255)/255,1); }
         function getGradeColor(g){ for(let i=GRADE_COLORS.length-1;i>=0;i--){ if(g>=GRADE_COLORS[i].grade) return hexToC4(GRADE_COLORS[i].color); } return hexToC4(GRADE_COLORS[0].color); }
 
-        // --- Flat Fill Mesh ---
         const bottomY = Math.min(...points.map(p=>p.y));
         const grades=[];
         for(let i=0;i<points.length-1;i++){
@@ -228,37 +247,89 @@
         fillMat.alpha = 1;
         fill.material=fillMat;
 
-        // --- Route Line ---
         const line = BABYLON.MeshBuilder.CreateLines("routeLine",{points:points,colors:points.map(()=>new BABYLON.Color4(0.75,0.75,0.75,1))},scene);
 
-        // --- Marker Arrow (YOU) ---
-        const marker = BABYLON.MeshBuilder.CreateSphere("marker",{ diameter: 0.1 },scene);
-        marker.isVisible = true;
 
-        // --- Get MAIN MARKER helmet color (Ego or Spectated) ---
-        let myHelmetColor = "#ffffff"; // Default white
+        // --- CORE MATH HELPER (USED BY ALL MARKERS) ---
+        // Calculates normalized 3D Target and 3D Speed for any rider given their ID, Dist(m), Speed(m/s)
+        function calculateRider3DData(riderId, distMeters, speedMps) {
+            const gm = window.gameManager;
+            let targetHuman = null;
+
+            // --- FIXED: CHECK EGO FIRST ---
+            if (gm?.ego && (gm.ego.athleteId == riderId || gm.ego.id == riderId)) {
+                targetHuman = gm.ego;
+            }
+            // --- THEN CHECK OTHERS ---
+            else if (gm?.humans) {
+                 targetHuman = gm.humans[riderId] || Object.values(gm.humans).find(h => (h.athleteId || h.id) == riderId);
+            }
+
+            // 1. Identify Path
+            let pathId = 0;
+            if (targetHuman && targetHuman.currentPath) {
+                pathId = targetHuman.currentPath.id;
+            }
+
+            // 2. Get Exact Path Length
+            const pathTotalMeters = pathLengths.get(pathId) || fallbackDistance;
+
+            // 3. Normalize Progress
+            let progress = (distMeters % pathTotalMeters) / pathTotalMeters;
+
+            // 4. Handle Reverse (Path B)
+            if (pathId === 1) {
+                progress = 1.0 - progress;
+            }
+
+            // 5. Convert to 3D Units
+            const target3D = progress * totalDist;
+
+            // 6. Convert Speed (m/s -> 3D/s)
+            let speed3D = speedMps * (totalDist / pathTotalMeters);
+
+            // --- SMOOTHING FIX FOR REVERSE PATH ---
+            // If on Path 1 (Reverse), flip Speed to be Negative
+            if (pathId === 1) {
+                speed3D = -speed3D;
+            }
+
+            return { target3D, speed3D, pathId, pathTotalMeters };
+        }
+
+
+        // --- MAIN MARKER (Me or Focal) ---
+        const marker = BABYLON.MeshBuilder.CreateSphere("marker",{ diameter: 0.1 },scene);
+        const arrow = BABYLON.MeshBuilder.CreateCylinder("arrow",{height:0.4,diameterTop:0,diameterBottom:0.2,tessellation:12},scene);
+        arrow.rotation.x=Math.PI; arrow.position.y=bottomY+0.6*1.2;
+        const arrowMat = new BABYLON.StandardMaterial("arrowMat",scene);
+        arrowMat.emissiveColor=new BABYLON.Color3(0.95,0.3,0.2); arrow.material=arrowMat; arrow.alwaysSelectAsActiveMesh=true;
+
+        // --- FORCE RENDER ---
+        marker.alwaysSelectAsActiveMesh = true;
+
+        // Main Marker Smoothing State
+        let mainMarkerState = {
+            lastUpdateTime: 0,
+            lastKnownDist: 0,
+            predictedDist: 0,
+            speed: 0,
+            initialized: false
+        };
+
+        // Initialize Main Marker Material
+        let myHelmetColor = "#ffffff";
         const gm = window.gameManager;
         const humans = gm?.humans || {};
         const ego = gm?.ego;
         const focalRider = gm?.focalRider;
-
-        // 1. Try EGO (You are riding)
         if (ego) {
-             myHelmetColor = ego?.entity?.design?.helmet_color
-                          || ego?.config?.design?.helmet_color
-                          || ego?.helmet_color
-                          || myHelmetColor;
-        }
-        // 2. Try FOCAL RIDER (You are spectating)
-        else if (focalRider) {
+             myHelmetColor = ego?.entity?.design?.helmet_color || ego?.config?.design?.helmet_color || ego?.helmet_color || myHelmetColor;
+        } else if (focalRider) {
             const focalId = focalRider.athleteId || focalRider.id;
             const targetHuman = humans[focalId] || Object.values(humans).find(h => (h.athleteId || h.id) == focalId);
-
-            if (targetHuman) {
-                 myHelmetColor = targetHuman?.config?.design?.helmet_color || myHelmetColor;
-            }
+            if (targetHuman) myHelmetColor = targetHuman?.config?.design?.helmet_color || myHelmetColor;
         }
-
         let myColor = new BABYLON.Color3(1, 1, 1);
         if (myHelmetColor && myHelmetColor.startsWith("#")) {
             const rr = parseInt(myHelmetColor.slice(1, 3), 16) / 255;
@@ -274,155 +345,114 @@
         myMat.outlineColor = new BABYLON.Color3(0, 0, 0);
         marker.material = myMat;
 
-        const arrow = BABYLON.MeshBuilder.CreateCylinder("arrow",{height:0.4,diameterTop:0,diameterBottom:0.2,tessellation:12},scene);
-        arrow.rotation.x=Math.PI; arrow.position.y=bottomY+0.6*1.2;
-        const arrowMat = new BABYLON.StandardMaterial("arrowMat",scene);
-        arrowMat.emissiveColor=new BABYLON.Color3(0.95,0.3,0.2); arrow.material=arrowMat; arrow.alwaysSelectAsActiveMesh=true;
 
-        const cursorEl = document.querySelector(".elev-cursor");
+        // --- UPDATE FUNCTION FOR MAIN MARKER ---
+        function updateMainMarker() {
+            if (!window.hackedRiders) return;
 
-        function findSegmentIndexByDist(d){
-            if(d<=0) return 0;
-            if(d>=totalDist) return cum.length-2;
-            let lo=0,hi=cum.length-1;
-            while(lo<=hi){
-                const mid=(lo+hi)>>1;
-                if(cum[mid]<=d && d<=cum[mid+1]) return mid;
-                if(cum[mid]<d) lo=mid+1;
-                else hi=mid-1;
+            const focalId = window.gameManager.focalRider?.athleteId || window.gameManager.focalRider?.id;
+            const myId = window.gameManager.ego?.athleteId;
+            const mainId = myId || focalId;
+
+            const r = window.hackedRiders.find(rider => rider.riderId == mainId);
+            if (!r) return; // Main rider data not found yet
+
+            // Calculate Target using standard logic
+            const data = calculateRider3DData(r.riderId, r.dist, r.speed);
+
+            const now = performance.now();
+
+            // Initialize or Update State
+            if (!mainMarkerState.initialized) {
+                mainMarkerState = {
+                    lastUpdateTime: now,
+                    lastKnownDist: data.target3D,
+                    predictedDist: data.target3D,
+                    speed: data.speed3D,
+                    initialized: true
+                };
+            } else if (Math.abs(mainMarkerState.lastKnownDist - data.target3D) > 0.001) {
+                // Data refreshed
+                mainMarkerState.lastUpdateTime = now;
+                mainMarkerState.lastKnownDist = data.target3D;
+                mainMarkerState.speed = data.speed3D;
             }
-            return Math.max(0,Math.min(cum.length-2,lo-1));
+
+            // Physics Prediction
+            const dt = (now - mainMarkerState.lastUpdateTime) / 1000;
+            let predictedPos = mainMarkerState.lastKnownDist + (mainMarkerState.speed * dt);
+
+            // Teleport Check
+            if (Math.abs(predictedPos - data.target3D) > totalDist * 0.5) {
+                predictedPos = data.target3D;
+                mainMarkerState.lastKnownDist = data.target3D;
+                mainMarkerState.lastUpdateTime = now;
+            }
+
+            // Loop Wrapping
+            if (predictedPos > totalDist) predictedPos = predictedPos % totalDist;
+            if (predictedPos < 0) predictedPos = totalDist + predictedPos;
+
+            // Map to 3D Points
+            const safeD = predictedPos;
+            let i = 0;
+            while (i < cum.length - 1 && !(cum[i] <= safeD && safeD <= cum[i + 1])) i++;
+            const segStart = cum[i];
+            const segEnd = cum[i + 1];
+            const localT = (safeD - segStart) / (segEnd - segStart || 1);
+            const pos = points[i].add(points[i + 1].subtract(points[i]).scale(localT));
+
+            // Apply to Meshes
+            marker.position.set(pos.x, pos.y, pos.z);
+            arrow.position.set(pos.x, pos.y + 0.35 + 0.2, pos.z);
         }
 
-        // --- UPDATE YOU (CURSOR) ---
-        function updateMarkerFromCursor(){
-            if(!cursorEl) return;
-            const m = cursorEl.style.left.match(/([\d.]+)%/); if(!m) return;
-            const pct = parseFloat(m[1])/100; if(!isFinite(pct)) return;
 
-            let targetDist = pct * totalDist;
-
-            // --- FIXED PATH LOGIC ---
-            // Determine the "Active Subject" (Ego OR Focal Rider)
-            // Then check THEIR path ID to see if we need to reverse the distance.
-            const gm = window.gameManager;
-            let activePathId = 0;
-
-            if (gm?.ego) {
-                // Easy case: We are riding
-                activePathId = gm.ego.currentPath?.id;
-            } else if (gm?.focalRider) {
-                // Hard case: Spectating. FocalRider object is incomplete.
-                // We must find the REAL human object using the focalRider's ID.
-                const fId = gm.focalRider.athleteId || gm.focalRider.id;
-
-                // Lookup in the humans list
-                const targetHuman = gm.humans?.[fId] || Object.values(gm.humans||{}).find(h => (h.athleteId||h.id) == fId);
-
-                if (targetHuman) {
-                    activePathId = targetHuman.currentPath?.id;
-                }
-            }
-
-            // Path ID 1 = Path B (Going Backwards)
-            if (activePathId === 1) {
-                targetDist = totalDist - targetDist;
-            }
-            // ------------------------
-
-            const i = findSegmentIndexByDist(targetDist);
-            const segStart=cum[i], segEnd=cum[i+1], segLen=segEnd-segStart||1;
-            const localT=(targetDist-segStart)/segLen;
-            const p0=points[i], p1=points[i+1];
-            const pos=p0.add(p1.subtract(p0).scale(localT));
-            marker.position.copyFrom(pos);
-            arrow.position.set(pos.x,pos.y+0.35,pos.z);
-        }
-
-        // --- Rider markers ---
+        // --- RIDER MARKERS (OTHERS) ---
         let riderMeshes = new Map();
 
-        // --- Get all riders (Absolute Logic) ---
-        function getRiderPositions() {
-            const results = [];
-            if (!window.hackedRiders || !window.gameManager?.humans) return results;
-
-            // Note: In spectate mode, everyone is "not me", so we process everyone.
-            // But we don't want to draw a duplicate dot for the Focal Rider if the Arrow is already tracking them.
-            // Let's filter out the currently watched rider from the "extra dots" list.
-            const focalId = window.gameManager.focalRider?.athleteId || window.gameManager.focalRider?.id;
-            const myId = window.gameManager.ego?.athleteId; // or undefined
-
-            const idToExclude = myId || focalId; // If riding, exclude me. If spectating, exclude watched.
-
-            if (!distanceKm) return results;
-
-            const gmHumans = window.gameManager.humans;
-
-            window.hackedRiders.forEach(r => {
-                // Skip the rider who is already represented by the main "Arrow/Marker"
-                if (r.riderId == idToExclude) return;
-
-                // 1. Get Human Object
-                let targetHuman = gmHumans[r.riderId];
-                if (!targetHuman) {
-                    for (const h of Object.values(gmHumans)) {
-                        if ((h.athleteId || h.id) === r.riderId) {
-                            targetHuman = h;
-                            break;
-                        }
-                    }
-                }
-
-                // 2. Calculate Distance
-                const riderKm = r.dist / 1000;
-                let wrappedKm = ((riderKm % distanceKm) + distanceKm) % distanceKm;
-
-                // 3. ABSOLUTE DIRECTION LOGIC
-                // Path ID 1 = Path B (Going Backwards)
-                if (targetHuman && targetHuman.currentPath && targetHuman.currentPath.id === 1) {
-                      wrappedKm = distanceKm - wrappedKm;
-                }
-
-                // Color
-                let helmetColor = "#ffffff";
-                if (targetHuman?.config?.design?.helmet_color) {
-                    helmetColor = targetHuman.config.design.helmet_color;
-                }
-
-                results.push({
-                    name: r.name,
-                    riderKm: wrappedKm,
-                    riderId: r.riderId,
-                    helmetColor
-                });
-            });
-            return results;
-        }
-
-        // --- Update rider meshes in the scene ---
         function updateRidersMarkers() {
-            const riders = getRiderPositions();
-            const existingNames = new Set(riders.map(r => r.name));
+            if (!window.hackedRiders) return;
+
+            const focalId = window.gameManager.focalRider?.athleteId || window.gameManager.focalRider?.id;
+            const myId = window.gameManager.ego?.athleteId;
+            const idToExclude = myId || focalId;
+            const gmHumans = window.gameManager.humans || {};
+
+            const ridersRaw = window.hackedRiders.filter(r => r.riderId != idToExclude);
+            const existingNames = new Set(ridersRaw.map(r => r.name));
 
             // Cleanup
-            for (let [name, mesh] of riderMeshes) {
+            for (let [name, entry] of riderMeshes) {
                 if (!existingNames.has(name)) {
-                    mesh.dispose();
+                    entry.mesh.dispose();
                     riderMeshes.delete(name);
                 }
             }
 
-            // Update
-            riders.forEach(r => {
-                let mesh = riderMeshes.get(r.name);
-                if (!mesh) {
-                    mesh = BABYLON.MeshBuilder.CreateSphere(r.name, { diameter: 0.1 }, scene);
+            const now = performance.now();
+
+            ridersRaw.forEach(r => {
+                let entry = riderMeshes.get(r.name);
+                const data = calculateRider3DData(r.riderId, r.dist, r.speed);
+
+                if (!entry) {
+                    // New Rider Init
+                    const mesh = BABYLON.MeshBuilder.CreateSphere(r.name, { diameter: 0.1 }, scene);
                     let color = new BABYLON.Color3(1, 1, 1);
-                    if (r.helmetColor && r.helmetColor.startsWith("#")) {
-                        const rr = parseInt(r.helmetColor.slice(1, 3), 16) / 255;
-                        const gg = parseInt(r.helmetColor.slice(3, 5), 16) / 255;
-                        const bb = parseInt(r.helmetColor.slice(5, 7), 16) / 255;
+                    mesh.alwaysSelectAsActiveMesh = true;
+
+                    // Color Lookup
+                    let targetHuman = gmHumans[r.riderId];
+                    if(!targetHuman) {
+                        for(const h of Object.values(gmHumans)) if((h.athleteId||h.id)==r.riderId) { targetHuman=h; break; }
+                    }
+                    let hex = targetHuman?.config?.design?.helmet_color || "#ffffff";
+
+                    if (hex.startsWith("#")) {
+                        const rr = parseInt(hex.slice(1, 3), 16) / 255;
+                        const gg = parseInt(hex.slice(3, 5), 16) / 255;
+                        const bb = parseInt(hex.slice(5, 7), 16) / 255;
                         color = new BABYLON.Color3(rr, gg, bb);
                     }
                     const mat = new BABYLON.StandardMaterial(r.name + "Mat", scene);
@@ -432,26 +462,53 @@
                     mat.outlineWidth = 1;
                     mat.outlineColor = new BABYLON.Color3(0, 0, 0);
                     mesh.material = mat;
-                    riderMeshes.set(r.name, mesh);
+
+                    entry = {
+                        mesh,
+                        lastUpdateTime: now,
+                        lastKnownDist: data.target3D,
+                        predictedDist: data.target3D,
+                        speed: data.speed3D
+                    };
+                    riderMeshes.set(r.name, entry);
+                } else {
+                    // State Update
+                    if (Math.abs(entry.lastKnownDist - data.target3D) > 0.001) {
+                         entry.lastUpdateTime = now;
+                         entry.lastKnownDist = data.target3D;
+                         entry.speed = data.speed3D;
+                    }
                 }
 
-                // Map KM -> 3D Units
-                // Note: wrappedKm is already flipped if needed by getRiderPositions
-                const targetDist = (r.riderKm / distanceKm) * totalDist;
+                // Physics Prediction
+                const dt = (now - entry.lastUpdateTime) / 1000;
+                let predictedPos = entry.lastKnownDist + (entry.speed * dt);
 
+                if (Math.abs(predictedPos - data.target3D) > totalDist * 0.5) {
+                    predictedPos = data.target3D;
+                    entry.lastKnownDist = data.target3D;
+                    entry.lastUpdateTime = now;
+                }
+
+                if (predictedPos > totalDist) predictedPos = predictedPos % totalDist;
+                if (predictedPos < 0) predictedPos = totalDist + predictedPos;
+
+                // Positioning
+                const safeD = predictedPos;
                 let i = 0;
-                while (i < cum.length - 1 && !(cum[i] <= targetDist && targetDist <= cum[i + 1])) i++;
+                while (i < cum.length - 1 && !(cum[i] <= safeD && safeD <= cum[i + 1])) i++;
                 const segStart = cum[i];
                 const segEnd = cum[i + 1];
-                const localT = (targetDist - segStart) / (segEnd - segStart || 1);
+                const localT = (safeD - segStart) / (segEnd - segStart || 1);
                 const pos = points[i].add(points[i + 1].subtract(points[i]).scale(localT));
-                mesh.position.copyFrom(pos);
+
+                // Height Offset
+                entry.mesh.position.set(pos.x, pos.y, pos.z);
             });
         }
 
-        // --- Render Loop ---
         engine.runRenderLoop(()=>{
-            updateMarkerFromCursor();
+            updateMainMarker();
             updateRidersMarkers();
             camera.setTarget(marker.position);
             scene.render();
