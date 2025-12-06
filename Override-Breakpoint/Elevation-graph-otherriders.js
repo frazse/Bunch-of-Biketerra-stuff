@@ -83,43 +83,61 @@ function waitForElevGraph(callback) {
 waitForElevGraph();
 window.addEventListener('resize', updateOverlayPosition);
 
-    // ============================
-    // READ EVERY RIDER POSITION
-    // ============================
+// ============================
+// READ EVERY RIDER POSITION
+// ============================
 function getRidersPositions() {
-    if (!window.hackedRiders || !window.gameManager?.humans) return [];
+    if (!window.hackedRiders || !window.gameManager?.humans || !window.gameManager?.ego) return [];
 
     const gmHumans = window.gameManager.humans;
+    const egoPathId = window.gameManager.ego.currentPath?.id; // Get your current Path ID (0 or 1)
+
     const myRider = window.hackedRiders.find(r => r.isMe);
     if (!myRider) return [];
 
-    const myKm = myRider.dist / 1000;
-
     const positions = [];
 
-window.hackedRiders.forEach(r => {
-    if (r.isMe) return; // ✅ DO NOT DRAW YOURSELF
+    window.hackedRiders.forEach(r => {
+        if (r.isMe) return; // ✅ DO NOT DRAW YOURSELF
+
         const riderKm = r.dist / 1000;
 
-        const percent = ((riderKm % routeLength) / routeLength) * 100;
+        // 1. Calculate standard percentage (0 to 100)
+        let percent = ((riderKm % routeLength) / routeLength) * 100;
 
-        // --- Helmet color lookup ---
-        let helmetColor = "#ffffff";
+        // 2. Find the specific human object to check their path
+        let targetHuman = gmHumans[r.riderId];
 
-        if (gmHumans[r.riderId]?.config?.design?.helmet_color) {
-            helmetColor = gmHumans[r.riderId].config.design.helmet_color;
-        } else {
+        // Fallback search if direct ID lookup fails (sometimes IDs drift in different arrays)
+        if (!targetHuman) {
             for (const h of Object.values(gmHumans)) {
                 if ((h.athleteId || h.id) === r.riderId) {
-                    helmetColor = h.config?.design?.helmet_color || helmetColor;
+                    targetHuman = h;
                     break;
                 }
             }
         }
 
+        // 3. Direction Check: Flip the rider if they are on a different path ID than you
+        if (targetHuman && targetHuman.currentPath && egoPathId !== undefined) {
+            const riderPathId = targetHuman.currentPath.id;
+
+            // If you are on Path A (0) and they are on Path B (1) -> Flip them
+            // If you are on Path B (1) and they are on Path A (0) -> Flip them
+            if (riderPathId !== egoPathId) {
+                percent = 100 - percent;
+            }
+        }
+
+        // --- Helmet color lookup ---
+        let helmetColor = "#ffffff";
+        if (targetHuman?.config?.design?.helmet_color) {
+            helmetColor = targetHuman.config.design.helmet_color;
+        }
+
         positions.push({
             name: r.name || String(r.riderId),
-            percent,
+            percent, // This is now direction-corrected
             helmetColor,
             isYou: r.isMe,
             isLeader: r.isLeader || false
