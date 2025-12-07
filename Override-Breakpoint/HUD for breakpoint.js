@@ -7,13 +7,14 @@
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate*
 // @exclude      https://biketerra.com/dashboard
+// @icon          https://www.google.com/s2/favicons?sz=64&domain=biketerra.com
 // @grant        none
 // ==/UserScript==
 
 (function() {
     'use strict';
 // ===== USER CONFIG =====
-const LOCAL_RIDER_NAME = "Josef Nilsson";   // <-- Used ONLY when you are actually riding (Ego exists)
+const LOCAL_RIDER_NAME = "SET-YOUR-NAME";   // <-- Used ONLY when you are actually riding (Ego exists)
 // =======================
 
 // --- Global Function to Handle Spectate Click ---
