@@ -7,6 +7,7 @@
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate/*
 // @exclude      https://biketerra.com/dashboard
+// @icon          https://www.google.com/s2/favicons?sz=64&domain=biketerra.com
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
