@@ -136,51 +136,13 @@
         const cum = new Array(points.length).fill(0);
         for(let i=1;i<points.length;i++){
             const dx=points[i].x-points[i-1].x;
+            const dy=points[i].y-points[i-1].y;
             const dz=points[i].z-points[i-1].z;
-            cum[i]=cum[i-1]+Math.hypot(dx,dz);
+            cum[i]=cum[i-1]+Math.sqrt(dx*dx+dy*dy+dz*dz);
         }
         const totalDist = cum[cum.length-1]||1;
         console.log(`[3D Viewer] Scene total distance: ${totalDist.toFixed(2)} units`);
 
-        // --- MULTI-PATH DISTANCE EXTRACTION ---
-        const pathLengths = new Map();
-        let fallbackDistance = 0;
-
-        function extractPathLengths(obj) {
-            if (obj && obj.paths && Array.isArray(obj.paths)) {
-                obj.paths.forEach(p => {
-                    if (p.id !== undefined && p.distance) {
-                        pathLengths.set(p.id, p.distance);
-                    }
-                });
-            }
-            if (obj && obj.pathA && obj.pathA.distance) pathLengths.set(0, obj.pathA.distance);
-            if (obj && obj.pathB && obj.pathB.distance) pathLengths.set(1, obj.pathB.distance);
-
-            if (pathLengths.size === 0 && typeof obj === 'object' && obj !== null) {
-                for (const k in obj) {
-                    if (obj.hasOwnProperty(k) && typeof obj[k] === 'object') {
-                        extractPathLengths(obj[k]);
-                        if (pathLengths.size > 0) return;
-                    }
-                }
-            }
-        }
-        extractPathLengths(j);
-
-        let gpsMeters = 0;
-        for(let i=1; i<raw.length; i++) {
-             const dx = xVals[i] - xVals[i-1];
-             const dz = zVals[i] - zVals[i-1];
-             gpsMeters += Math.hypot(dx, dz);
-        }
-        fallbackDistance = gpsMeters;
-
-        if (pathLengths.size > 0) {
-            console.log("[3D Viewer] Found Internal Path Lengths:", Object.fromEntries(pathLengths));
-        } else {
-            console.warn("[3D Viewer] Using GPS Fallback Distance:", fallbackDistance);
-        }
 
         // --- Create Canvas + Scene ---
         const canvas=document.createElement("canvas");
@@ -333,45 +295,78 @@
             };
         }
 
-        // --- CORE MATH HELPER (USED BY ALL MARKERS) ---
-        function calculateRider3DData(riderId, distMeters, speedMps) {
-            const gm = window.gameManager;
-            let targetHuman = null;
+function calculateRider3DData(riderId, distMeters, speedMps) {
+    const gm = window.gameManager;
+    let targetHuman = null;
 
-            if (gm?.ego && (gm.ego.athleteId == riderId || gm.ego.id == riderId)) {
-                targetHuman = gm.ego;
-            }
-            else if (!gm?.ego && gm?.focalRider && (gm.focalRider.athleteId == riderId || gm.focalRider.id == riderId)) {
-                const fId = gm.focalRider.athleteId || gm.focalRider.id;
-                if (gm.humans) {
-                     targetHuman = gm.humans[fId] || Object.values(gm.humans).find(h => (h.athleteId || h.id) == fId);
-                }
-            }
-            if (!targetHuman && gm?.humans) {
-                 targetHuman = gm.humans[riderId] || Object.values(gm.humans).find(h => (h.athleteId || h.id) == riderId);
-            }
+    // --- Resolve Human ---
+    if (gm?.ego && (gm.ego.athleteId == riderId || gm.ego.id == riderId)) {
+        targetHuman = gm.ego;
+    }
+    else if (gm?.focalRider && (gm.focalRider.athleteId == riderId || gm.focalRider.id == riderId)) {
+        const fId = gm.focalRider.athleteId || gm.focalRider.id;
+        targetHuman =
+            gm.humans?.[fId] ||
+            Object.values(gm.humans || {}).find(h => (h.athleteId || h.id) == fId);
+    }
+    else if (gm?.humans) {
+        targetHuman =
+            gm.humans[riderId] ||
+            Object.values(gm.humans).find(h => (h.athleteId || h.id) == riderId);
+    }
 
-            let pathId = 0;
-            if (targetHuman && targetHuman.currentPath) {
-                pathId = targetHuman.currentPath.id;
-            }
+    // --- Path ID (0 = A, 1 = B) ---
+    const pathId = targetHuman?.currentPath?.id ?? 0;
 
-            const pathTotalMeters = pathLengths.get(pathId) || fallbackDistance;
-            let progress = (distMeters % pathTotalMeters) / pathTotalMeters;
+    // --- ✅ CORRECT LIVE GAME DISTANCE SOURCE (pathA.distance / pathB.distance) ---
+    let pathTotalMeters = 0;
+    const road = targetHuman?.currentPath?.road;
 
-            if (pathId === 1) {
-                progress = 1.0 - progress;
-            }
-
-            const target3D = progress * totalDist;
-            let speed3D = speedMps * (totalDist / pathTotalMeters);
-
-            if (pathId === 1) {
-                speed3D = -speed3D;
-            }
-
-            return { target3D, speed3D, pathId, pathTotalMeters };
+    if (road) {
+        if (pathId === 0 && typeof road.pathA?.distance === "number") {
+            pathTotalMeters = road.pathA.distance;
         }
+        else if (pathId === 1 && typeof road.pathB?.distance === "number") {
+            pathTotalMeters = road.pathB.distance;
+        }
+    }
+
+    // --- Hard safety fallback (should NOT trigger anymore) ---
+    if (!pathTotalMeters || pathTotalMeters < 1) {
+        console.warn("[3D Viewer] Missing path length for rider", riderId, "fallback used");
+        pathTotalMeters = Math.max(distMeters, 1);
+    }
+
+    // --- Progress based on correct in-game meters ---
+    let progress = (distMeters % pathTotalMeters) / pathTotalMeters;
+
+    if (pathId === 1) {
+        progress = 1.0 - progress;
+    }
+
+    // --- Scene Mapping (per-path exact scaling) ---
+    const sceneUnitsPerMeter = totalDist / pathTotalMeters;
+
+    let target3D = distMeters * sceneUnitsPerMeter;
+    let speed3D  = speedMps   * sceneUnitsPerMeter;
+
+    if (pathId === 1) {
+        target3D = totalDist - target3D;
+        speed3D  = -speed3D;
+    }
+
+    // --- Final wrap safety ---
+    if (totalDist > 0) {
+        target3D = ((target3D % totalDist) + totalDist) % totalDist;
+    }
+
+    return {
+        target3D,
+        speed3D,
+        pathId,
+        pathTotalMeters
+    };
+}
 
         // --- MAIN MARKER (Me or Focal) ---
         const marker = createTwoColorSphere("mainMarker", "#ffffff", "#ffffff", scene);
