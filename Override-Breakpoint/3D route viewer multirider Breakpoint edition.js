@@ -387,17 +387,21 @@ function calculateRider3DData(riderId, distMeters, speedMps) {
         let currentMarkerHelmetHex = "#ffffff";
         let currentMarkerSkinHex = "#ffffff";
 
-        function updateMarkerColor() {
+function updateMarkerColor() {
             const gm = window.gameManager;
             const humans = gm?.humans || {};
             const ego = gm?.ego;
             const focalRider = gm?.focalRider;
-            let newHelmetHex = currentMarkerHelmetHex;
-            let newSkinHex = currentMarkerSkinHex;
+            let newHelmetHex = "#ffffff";
+            let newSkinHex = "#ffffff";
 
-            if (ego && ego.config?.design) {
-                if (ego.config.design.helmet_color) newHelmetHex = ego.config.design.helmet_color;
-                if (ego.config.design.skin_color) newSkinHex = ego.config.design.skin_color;
+            if (ego) {
+                const design = ego.entity?.design || ego.config?.design;
+
+                if (design) {
+                    newHelmetHex = design.helmet_color || "#ffffff";
+                    newSkinHex = design.skin_color || "#ffffff";
+                }
             }
             else if (focalRider) {
                 const focalId = focalRider.athleteId || focalRider.id;
@@ -407,21 +411,24 @@ function calculateRider3DData(riderId, distMeters, speedMps) {
                     targetHuman = Object.values(humans).find(h => (h.athleteId || h.id) == focalId);
                 }
 
-                if (targetHuman && targetHuman.config?.design) {
-                    if (targetHuman.config.design.helmet_color) newHelmetHex = targetHuman.config.design.helmet_color;
-                    if (targetHuman.config.design.skin_color) newSkinHex = targetHuman.config.design.skin_color;
+                if (targetHuman) {
+                    const design = targetHuman.entity?.design || targetHuman.config?.design;
+
+                    if (design) {
+                        newHelmetHex = design.helmet_color || "#ffffff";
+                        newSkinHex = design.skin_color || "#ffffff";
+                    }
                 }
             }
 
-            if ((newHelmetHex !== currentMarkerHelmetHex || newSkinHex !== currentMarkerSkinHex) &&
-                newHelmetHex.startsWith("#") && newSkinHex.startsWith("#")) {
-                currentMarkerHelmetHex = newHelmetHex;
-                currentMarkerSkinHex = newSkinHex;
-                marker.updateColors(newHelmetHex, newSkinHex);
+            if (newHelmetHex !== currentMarkerHelmetHex || newSkinHex !== currentMarkerSkinHex) {
+                if (newHelmetHex.startsWith("#") && newSkinHex.startsWith("#")) {
+                    currentMarkerHelmetHex = newHelmetHex;
+                    currentMarkerSkinHex = newSkinHex;
+                    marker.updateColors(newHelmetHex, newSkinHex);
+                }
             }
-        }
-
-        function updateMainMarker() {
+        }        function updateMainMarker() {
             if (!window.hackedRiders) return;
 
             updateMarkerColor();
