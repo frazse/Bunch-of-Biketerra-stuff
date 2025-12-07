@@ -1,14 +1,14 @@
 // ==UserScript==
-// @name         Biketerra 3D Route Viewer + Multi Rider Absolute Edition
-// @namespace    http://tampermonkey.net/
-// @version      2.9
-// @description  3D viewer. FIXED: Main marker is now Physics-Only for consistent Path ID detection across all modes (Riding & Spectating).
-// @author       Josef/chatgpt
-// @match        https://biketerra.com/ride*
-// @match        https://biketerra.com/spectate/*
-// @exclude      https://biketerra.com/dashboard
-// @icon         https://www.google.com/s2/favicons?sz=64&domain=biketerra.com
-// @grant        none
+// @name          Biketerra 3D Route Viewer + Multi Rider Absolute Edition
+// @namespace     http://tampermonkey.net/
+// @version       3.0.0
+// @description   3D viewer with two-color markers: helmet (top) + skin (bottom)
+// @author        Josef/chatgpt
+// @match         https://biketerra.com/ride*
+// @match         https://biketerra.com/spectate/*
+// @exclude       https://biketerra.com/dashboard
+// @icon          https://www.google.com/s2/favicons?sz=64&domain=biketerra.com
+// @grant         none
 // ==/UserScript==
 
 (function() {
@@ -50,8 +50,16 @@
         return true;
     }
 
-    // We still wait for the element, but we won't use it for positioning anymore.
     waitFor(".elev-cursor").then(()=>{ start3DViewer(); }).catch(console.error);
+    waitFor(".view-toggle").then(el => {
+        if(el) el.style.display = 'none';
+    }).catch(() => {});
+    waitFor(".rider-list-footer").then(el => {
+        if(el) {
+            el.style.paddingTop = '.1rem';
+            el.style.paddingRight = '.3rem';
+        }
+    }).catch(() => {});
 
     // ---------- Start 3D Viewer ----------
     async function start3DViewer() {
@@ -68,7 +76,6 @@
         // --- Determine JSON URL ---
         let url;
         const params = new URLSearchParams(window.location.search);
-        // isSpectating flag is no longer strictly needed but helps context
         let isSpectating = window.location.pathname.startsWith("/spectate/");
 
         if(isSpectating){
@@ -135,7 +142,6 @@
         const totalDist = cum[cum.length-1]||1;
         console.log(`[3D Viewer] Scene total distance: ${totalDist.toFixed(2)} units`);
 
-
         // --- MULTI-PATH DISTANCE EXTRACTION ---
         const pathLengths = new Map();
         let fallbackDistance = 0;
@@ -175,8 +181,6 @@
         } else {
             console.warn("[3D Viewer] Using GPS Fallback Distance:", fallbackDistance);
         }
-        // ---------------------------------------------
-
 
         // --- Create Canvas + Scene ---
         const canvas=document.createElement("canvas");
@@ -188,6 +192,8 @@
         scene.clearColor = new BABYLON.Color4(0,0,0,0.5);
 
         // --- STATIC MARKERS ---
+        const bottomY = Math.min(...points.map(p=>p.y));
+
         const startMarker = BABYLON.MeshBuilder.CreateCylinder("startMarker", { height: 1.2, diameter: 0.10 }, scene);
         const endMarker = BABYLON.MeshBuilder.CreateCylinder("endMarker", { height: 1.2, diameter: 0.10 }, scene);
         const startMat = new BABYLON.StandardMaterial("startMat", scene);
@@ -217,7 +223,6 @@
         function hexToC4(hex){ const n=parseInt(hex.slice(1),16); return new BABYLON.Color4((n>>16&255)/255,(n>>8&255)/255,(n&255)/255,1); }
         function getGradeColor(g){ for(let i=GRADE_COLORS.length-1;i>=0;i--){ if(g>=GRADE_COLORS[i].grade) return hexToC4(GRADE_COLORS[i].color); } return hexToC4(GRADE_COLORS[0].color); }
 
-        const bottomY = Math.min(...points.map(p=>p.y));
         const grades=[];
         for(let i=0;i<points.length-1;i++){
             const dy=points[i+1].y-points[i].y;
@@ -253,39 +258,107 @@
 
         const line = BABYLON.MeshBuilder.CreateLines("routeLine",{points:points,colors:points.map(()=>new BABYLON.Color4(0.75,0.75,0.75,1))},scene);
 
+        // --- UTILITY: Create Two-Color Sphere ---
+        function createTwoColorSphere(name, helmetHex, skinHex, scene) {
+            const hemisphereTop = BABYLON.MeshBuilder.CreateSphere(name + "_top", {
+                diameter: 0.1,
+                slice: 0.5,
+                sideOrientation: BABYLON.Mesh.DOUBLESIDE
+            }, scene);
+
+            const hemisphereBottom = BABYLON.MeshBuilder.CreateSphere(name + "_bottom", {
+                diameter: 0.1,
+                slice: 0.5,
+                sideOrientation: BABYLON.Mesh.DOUBLESIDE
+            }, scene);
+
+            hemisphereBottom.rotation.z = Math.PI;
+
+            const parent = new BABYLON.TransformNode(name + "_parent", scene);
+            hemisphereTop.parent = parent;
+            hemisphereBottom.parent = parent;
+
+            // Create materials
+            const topMat = new BABYLON.StandardMaterial(name + "_topMat", scene);
+            const bottomMat = new BABYLON.StandardMaterial(name + "_bottomMat", scene);
+
+            // Helper to convert hex to Color3
+            function hexToColor3(hex) {
+                if (!hex || !hex.startsWith("#") || hex.length !== 7) {
+                    console.warn("[3D Viewer] Invalid hex color:", hex);
+                    return new BABYLON.Color3(1, 1, 1);
+                }
+                const rr = parseInt(hex.slice(1, 3), 16) / 255;
+                const gg = parseInt(hex.slice(3, 5), 16) / 255;
+                const bb = parseInt(hex.slice(5, 7), 16) / 255;
+                return new BABYLON.Color3(rr, gg, bb);
+            }
+
+            const helmetColor = hexToColor3(helmetHex);
+            const skinColor = hexToColor3(skinHex);
+
+            // Use emissive color ONLY to ensure colors show properly without lighting interference
+            topMat.emissiveColor = helmetColor;
+            topMat.diffuseColor = new BABYLON.Color3(0, 0, 0);
+            topMat.specularColor = new BABYLON.Color3(0, 0, 0);
+            topMat.backFaceCulling = false;
+
+            bottomMat.emissiveColor = skinColor;
+            bottomMat.diffuseColor = new BABYLON.Color3(0, 0, 0);
+            bottomMat.specularColor = new BABYLON.Color3(0, 0, 0);
+            bottomMat.backFaceCulling = false;
+
+            hemisphereTop.material = topMat;
+            hemisphereBottom.material = bottomMat;
+
+            hemisphereTop.alwaysSelectAsActiveMesh = true;
+            hemisphereBottom.alwaysSelectAsActiveMesh = true;
+
+            return {
+                parent,
+                topMesh: hemisphereTop,
+                bottomMesh: hemisphereBottom,
+                topMat,
+                bottomMat,
+                updateColors: function(newHelmetHex, newSkinHex) {
+                    const newHelmet = hexToColor3(newHelmetHex);
+                    const newSkin = hexToColor3(newSkinHex);
+                    topMat.emissiveColor = newHelmet;
+                    topMat.diffuseColor = new BABYLON.Color3(0, 0, 0);
+                    topMat.specularColor = new BABYLON.Color3(0, 0, 0);
+                    bottomMat.emissiveColor = newSkin;
+                    bottomMat.diffuseColor = new BABYLON.Color3(0, 0, 0);
+                    bottomMat.specularColor = new BABYLON.Color3(0, 0, 0);
+                }
+            };
+        }
 
         // --- CORE MATH HELPER (USED BY ALL MARKERS) ---
         function calculateRider3DData(riderId, distMeters, speedMps) {
             const gm = window.gameManager;
             let targetHuman = null;
 
-            // 1. Check EGO (Active Player)
             if (gm?.ego && (gm.ego.athleteId == riderId || gm.ego.id == riderId)) {
                 targetHuman = gm.ego;
             }
-            // 2. Check FOCAL RIDER (Spectator Mode, ensures path is found)
             else if (!gm?.ego && gm?.focalRider && (gm.focalRider.athleteId == riderId || gm.focalRider.id == riderId)) {
                 const fId = gm.focalRider.athleteId || gm.focalRider.id;
                 if (gm.humans) {
                      targetHuman = gm.humans[fId] || Object.values(gm.humans).find(h => (h.athleteId || h.id) == fId);
                 }
             }
-            // 3. Check HUMANS (Everyone Else)
             if (!targetHuman && gm?.humans) {
                  targetHuman = gm.humans[riderId] || Object.values(gm.humans).find(h => (h.athleteId || h.id) == riderId);
             }
 
-            // --- Logic ---
             let pathId = 0;
             if (targetHuman && targetHuman.currentPath) {
                 pathId = targetHuman.currentPath.id;
             }
 
             const pathTotalMeters = pathLengths.get(pathId) || fallbackDistance;
-
             let progress = (distMeters % pathTotalMeters) / pathTotalMeters;
 
-            // If Path B (1), flip progress
             if (pathId === 1) {
                 progress = 1.0 - progress;
             }
@@ -293,7 +366,6 @@
             const target3D = progress * totalDist;
             let speed3D = speedMps * (totalDist / pathTotalMeters);
 
-            // --- SMOOTHING FIX: NEGATIVE SPEED ON REVERSE PATH ---
             if (pathId === 1) {
                 speed3D = -speed3D;
             }
@@ -301,18 +373,14 @@
             return { target3D, speed3D, pathId, pathTotalMeters };
         }
 
-
         // --- MAIN MARKER (Me or Focal) ---
-        const marker = BABYLON.MeshBuilder.CreateSphere("marker",{ diameter: 0.1 },scene);
+        const marker = createTwoColorSphere("mainMarker", "#ffffff", "#ffffff", scene);
+
         const arrow = BABYLON.MeshBuilder.CreateCylinder("arrow",{height:0.4,diameterTop:0,diameterBottom:0.2,tessellation:12},scene);
         arrow.rotation.x=Math.PI; arrow.position.y=bottomY+0.6*1.2;
         const arrowMat = new BABYLON.StandardMaterial("arrowMat",scene);
         arrowMat.emissiveColor=new BABYLON.Color3(0.95,0.3,0.2); arrow.material=arrowMat; arrow.alwaysSelectAsActiveMesh=true;
 
-        // --- FORCE RENDER ---
-        marker.alwaysSelectAsActiveMesh = true;
-
-        // Main Marker Smoothing State
         let mainMarkerState = {
             lastUpdateTime: 0,
             lastKnownDist: 0,
@@ -321,37 +389,47 @@
             initialized: false
         };
 
-        // Initialize Main Marker Material
-        let myHelmetColor = "#ffffff";
-        const gm = window.gameManager;
-        const humans = gm?.humans || {};
-        const ego = gm?.ego;
-        const focalRider = gm?.focalRider;
-        if (ego) {
-             myHelmetColor = ego?.entity?.design?.helmet_color || ego?.config?.design?.helmet_color || ego?.helmet_color || myHelmetColor;
-        } else if (focalRider) {
-            const focalId = focalRider.athleteId || focalRider.id;
-            const targetHuman = humans[focalId] || Object.values(humans).find(h => (h.athleteId || h.id) == focalId);
-            if (targetHuman) myHelmetColor = targetHuman?.config?.design?.helmet_color || myHelmetColor;
-        }
-        let myColor = new BABYLON.Color3(1, 1, 1);
-        if (myHelmetColor && myHelmetColor.startsWith("#")) {
-            const rr = parseInt(myHelmetColor.slice(1, 3), 16) / 255;
-            const gg = parseInt(myHelmetColor.slice(3, 5), 16) / 255;
-            const bb = parseInt(myHelmetColor.slice(5, 7), 16) / 255;
-            myColor = new BABYLON.Color3(rr, gg, bb);
-        }
-        const myMat = new BABYLON.StandardMaterial("myMarkerMat", scene);
-        myMat.diffuseColor = myColor;
-        myMat.emissiveColor = myColor;
-        myMat.backFaceCulling = false;
-        myMat.outlineWidth = 1;
-        myMat.outlineColor = new BABYLON.Color3(0, 0, 0);
-        marker.material = myMat;
+        let currentMarkerHelmetHex = "#ffffff";
+        let currentMarkerSkinHex = "#ffffff";
 
-        // --- UPDATE FUNCTION FOR MAIN MARKER (PHYSICS ONLY) ---
+        function updateMarkerColor() {
+            const gm = window.gameManager;
+            const humans = gm?.humans || {};
+            const ego = gm?.ego;
+            const focalRider = gm?.focalRider;
+            let newHelmetHex = currentMarkerHelmetHex;
+            let newSkinHex = currentMarkerSkinHex;
+
+            if (ego && ego.config?.design) {
+                if (ego.config.design.helmet_color) newHelmetHex = ego.config.design.helmet_color;
+                if (ego.config.design.skin_color) newSkinHex = ego.config.design.skin_color;
+            }
+            else if (focalRider) {
+                const focalId = focalRider.athleteId || focalRider.id;
+                let targetHuman = humans[focalId];
+
+                if (!targetHuman) {
+                    targetHuman = Object.values(humans).find(h => (h.athleteId || h.id) == focalId);
+                }
+
+                if (targetHuman && targetHuman.config?.design) {
+                    if (targetHuman.config.design.helmet_color) newHelmetHex = targetHuman.config.design.helmet_color;
+                    if (targetHuman.config.design.skin_color) newSkinHex = targetHuman.config.design.skin_color;
+                }
+            }
+
+            if ((newHelmetHex !== currentMarkerHelmetHex || newSkinHex !== currentMarkerSkinHex) &&
+                newHelmetHex.startsWith("#") && newSkinHex.startsWith("#")) {
+                currentMarkerHelmetHex = newHelmetHex;
+                currentMarkerSkinHex = newSkinHex;
+                marker.updateColors(newHelmetHex, newSkinHex);
+            }
+        }
+
         function updateMainMarker() {
             if (!window.hackedRiders) return;
+
+            updateMarkerColor();
 
             const focalId = window.gameManager.focalRider?.athleteId || window.gameManager.focalRider?.id;
             const myId = window.gameManager.ego?.athleteId;
@@ -360,9 +438,7 @@
             const r = window.hackedRiders.find(rider => rider.riderId == mainId);
             if (!r) return;
 
-            // Calculate Target using path-aware logic
             const data = calculateRider3DData(r.riderId, r.dist, r.speed);
-
             const now = performance.now();
 
             if (!mainMarkerState.initialized) {
@@ -373,11 +449,9 @@
                 mainMarkerState.speed = data.speed3D;
             }
 
-            // Physics Prediction
             const dt = (now - mainMarkerState.lastUpdateTime) / 1000;
             let predictedPos = mainMarkerState.lastKnownDist + (mainMarkerState.speed * dt);
 
-            // Teleport Check & Wrapping
             if (Math.abs(predictedPos - data.target3D) > totalDist * 0.5) {
                 predictedPos = data.target3D;
                 mainMarkerState.lastKnownDist = data.target3D;
@@ -386,7 +460,6 @@
             if (predictedPos > totalDist) predictedPos = predictedPos % totalDist;
             if (predictedPos < 0) predictedPos = totalDist + predictedPos;
 
-            // Map to 3D Points
             const safeD = predictedPos;
             let i = 0;
             while (i < cum.length - 1 && !(cum[i] <= safeD && safeD <= cum[i + 1])) i++;
@@ -395,11 +468,9 @@
             const localT = (safeD - segStart) / (segEnd - segStart || 1);
             const pos = points[i].add(points[i + 1].subtract(points[i]).scale(localT));
 
-            // Apply to Meshes
-            marker.position.set(pos.x, pos.y, pos.z);
+            marker.parent.position.set(pos.x, pos.y, pos.z);
             arrow.position.set(pos.x, pos.y + 0.35, pos.z);
         }
-
 
         // --- RIDER MARKERS (OTHERS) ---
         let riderMeshes = new Map();
@@ -415,10 +486,9 @@
             const ridersRaw = window.hackedRiders.filter(r => r.riderId != idToExclude);
             const existingNames = new Set(ridersRaw.map(r => r.name));
 
-            // Cleanup
             for (let [name, entry] of riderMeshes) {
                 if (!existingNames.has(name)) {
-                    entry.mesh.dispose();
+                    entry.sphere.parent.dispose();
                     riderMeshes.delete(name);
                 }
             }
@@ -429,40 +499,48 @@
                 let entry = riderMeshes.get(r.name);
                 const data = calculateRider3DData(r.riderId, r.dist, r.speed);
 
+                // Get current colors from game data
+                let targetHuman = gmHumans[r.riderId];
+                if(!targetHuman) {
+                    for(const h of Object.values(gmHumans)) if((h.athleteId||h.id)==r.riderId) { targetHuman=h; break; }
+                }
+
+                let helmetHex = "#ffffff";
+                let skinHex = "#ffffff";
+
+                if (targetHuman?.config?.design) {
+                    helmetHex = targetHuman.config.design.helmet_color || "#ffffff";
+                    skinHex = targetHuman.config.design.skin_color || "#ffffff";
+
+                    // Debug logging (only log once per rider when colors are found)
+                    if (!entry && skinHex !== "#ffffff") {
+                        console.log(`[3D Viewer] Rider ${r.name}: helmet=${helmetHex}, skin=${skinHex}`);
+                    }
+                } else if (!entry) {
+                    console.log(`[3D Viewer] Rider ${r.name} (ID: ${r.riderId}): No config data yet`);
+                }
+
                 if (!entry) {
-                    const mesh = BABYLON.MeshBuilder.CreateSphere(r.name, { diameter: 0.1 }, scene);
-                    let color = new BABYLON.Color3(1, 1, 1);
-                    mesh.alwaysSelectAsActiveMesh = true;
-
-                    let targetHuman = gmHumans[r.riderId];
-                    if(!targetHuman) {
-                        for(const h of Object.values(gmHumans)) if((h.athleteId||h.id)==r.riderId) { targetHuman=h; break; }
-                    }
-                    let hex = targetHuman?.config?.design?.helmet_color || "#ffffff";
-
-                    if (hex.startsWith("#")) {
-                        const rr = parseInt(hex.slice(1, 3), 16) / 255;
-                        const gg = parseInt(hex.slice(3, 5), 16) / 255;
-                        const bb = parseInt(hex.slice(5, 7), 16) / 255;
-                        color = new BABYLON.Color3(rr, gg, bb);
-                    }
-                    const mat = new BABYLON.StandardMaterial(r.name + "Mat", scene);
-                    mat.diffuseColor = color;
-                    mat.emissiveColor = color;
-                    mat.backFaceCulling = false;
-                    mat.outlineWidth = 1;
-                    mat.outlineColor = new BABYLON.Color3(0, 0, 0);
-                    mesh.material = mat;
+                    const sphere = createTwoColorSphere(r.name, helmetHex, skinHex, scene);
 
                     entry = {
-                        mesh,
+                        sphere,
                         lastUpdateTime: now,
                         lastKnownDist: data.target3D,
                         predictedDist: data.target3D,
-                        speed: data.speed3D
+                        speed: data.speed3D,
+                        lastHelmetHex: helmetHex,
+                        lastSkinHex: skinHex
                     };
                     riderMeshes.set(r.name, entry);
                 } else {
+                    // Update colors if they've changed
+                    if (helmetHex !== entry.lastHelmetHex || skinHex !== entry.lastSkinHex) {
+                        entry.sphere.updateColors(helmetHex, skinHex);
+                        entry.lastHelmetHex = helmetHex;
+                        entry.lastSkinHex = skinHex;
+                    }
+
                     if (Math.abs(entry.lastKnownDist - data.target3D) > 0.001) {
                          entry.lastUpdateTime = now;
                          entry.lastKnownDist = data.target3D;
@@ -490,14 +568,14 @@
                 const localT = (safeD - segStart) / (segEnd - segStart || 1);
                 const pos = points[i].add(points[i + 1].subtract(points[i]).scale(localT));
 
-                entry.mesh.position.set(pos.x, pos.y, pos.z);
+                entry.sphere.parent.position.set(pos.x, pos.y, pos.z);
             });
         }
 
         engine.runRenderLoop(()=>{
             updateMainMarker();
             updateRidersMarkers();
-            camera.setTarget(marker.position);
+            camera.setTarget(marker.parent.position);
             scene.render();
         });
 
