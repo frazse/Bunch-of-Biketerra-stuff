@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra - Riderlist replacement HUD
 // @namespace    http://tampermonkey.net/
-// @version      11.3
-// @description  FINAL: HUD with accurate metrics. Handles Name/Color correctly for both Riding (Ego) and Spectating (FocalRider).
+// @version      11.4
+// @description  Fixed gap calculation to show relative to ego/focalRider, not leader
 // @author       You
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate*
@@ -141,23 +141,32 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
         statusLight.innerText = "●";
         statusLight.style.color = "#00ff00";
 
+        // --- Determine reference rider (me/ego or focalRider) ---
+        const gm = window.gameManager;
+        const ego = gm?.ego;
+        const focalRiderObj = gm?.focalRider;
+
+        let referenceRiderId = null;
+        if (ego) {
+            referenceRiderId = ego.athleteId || ego.id;
+        } else if (focalRiderObj) {
+            referenceRiderId = focalRiderObj.athleteId || focalRiderObj.id;
+        }
+
+        const referenceRider = riders.find(r => r.riderId === referenceRiderId) || riders[0];
+        const referenceLap = referenceRider?.lap || 1;
+        const referenceDist = referenceRider?.lapDistance || 0;
+
         // --- Build table ---
         let html = '';
-        const currentLeaderDist = riders[0]?.lapDistance || 0;
 
         riders.forEach(r => {
             // --- UPDATED NAME LOGIC ---
-            // If it is 'Me' AND Ego exists -> Use Custom Local Name
-            // If it is 'Me' BUT Ego is missing (Spectating) -> Use the real name from the rider object
-            // If it is someone else -> Use their name
             let name;
-            const ego = window.gameManager?.ego;
-
             if (r.isMe) {
                 if (ego) {
                     name = LOCAL_RIDER_NAME;
                 } else {
-                    // Spectator mode: Use the actual name of the focal rider
                     name = r.name || "Spectating";
                 }
             } else {
@@ -171,11 +180,25 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
             const wkg = r.wkg.toFixed(1);
 
             let gapText;
-            if (r.lap < leaderLap) gapText = `+${leaderLap - r.lap} Lap${leaderLap - r.lap > 1 ? "s" : ""}`;
+
+            // SAME RIDER AS REFERENCE (me/ego/focal)
+            if (r.riderId === referenceRiderId) {
+                gapText = "0m";
+            }
+            // DIFFERENT LAP → show lap gap
+            else if (r.lap !== referenceLap) {
+                const lapDiff = r.lap - referenceLap;
+
+                if (lapDiff > 0) gapText = `+${lapDiff} Lap${lapDiff > 1 ? "s" : ""}`;
+                else gapText = `${lapDiff} Lap`; // negative lap = behind
+            }
+            // SAME LAP → show meter gap
             else {
-                const gapMeters = r.lapDistance - currentLeaderDist;
+                const gapMeters = r.lapDistance - referenceDist;
+
                 if (gapMeters === 0) gapText = "0m";
-                else gapText = `${Math.round(gapMeters)}m`;
+                else if (gapMeters > 0) gapText = `+${Math.round(gapMeters)}m`;
+                else gapText = `${Math.round(gapMeters)}m`; // already negative
             }
 
             let wkgColor = '#fff';
@@ -184,8 +207,7 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
 
             // --- HELMET COLOR LOGIC ---
             let helmetColor = "#444444"; // default fallback
-            const gmHumans = window.gameManager?.humans || {};
-            const focalRider = window.gameManager?.focalRider;
+            const gmHumans = gm?.humans || {};
 
             if (r.isMe) {
                 // Priority 1: Use EGO (if actually riding)
@@ -196,8 +218,8 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
                                 || helmetColor;
                 }
                 // Priority 2: Use Focal Rider ID to find human (if spectating/ego missing)
-                else if (focalRider) {
-                    const focalId = focalRider.athleteId || focalRider.id;
+                else if (focalRiderObj) {
+                    const focalId = focalRiderObj.athleteId || focalRiderObj.id;
                     const targetHuman = gmHumans[focalId] || Object.values(gmHumans).find(h => (h.athleteId || h.id) == focalId);
                     if (targetHuman) {
                         helmetColor = targetHuman?.config?.design?.helmet_color || helmetColor;
