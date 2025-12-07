@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra Elevation Graph Multi Rider
 // @namespace    http://tampermonkey.net/
-// @version      2.0
-// @description  FIXED: Removed redundant absolute speed flip. Speed is now only negated when the rider's path opposes the graph's visible path.
+// @version      2.2
+// @description  Two-color rider lines with group highlighting for nearby riders
 // @author       Josef
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate/*
@@ -13,15 +13,23 @@
 
 (function () {
     'use strict';
-    console.log("[LeaderOverlay v2.0] Script started with streamlined speed logic.");
+    console.log("[LeaderOverlay v2.2] Script started with grouping feature.");
+
+    // ============================
+    // CONFIGURATION
+    // ============================
+    const GROUP_DISTANCE_METERS = 20; // Riders within this distance are grouped together
+    const GROUP_RECT_COLOR = "rgba(255, 255, 255, 0.8)"; // Yellow with transparency
+    const GROUP_RECT_BORDER = "rgba(255, 255, 255, 1)"; // Yellow border
 
     const checkInterval = 500;
     let autoDetect = true;
     let routeLength = 0; // Stored in KM for logging/fallback
     let overlay;
     let svg = null;
-    // name → {line: SVG line, lastUpdateTime: number, lastKnownDist: number, speed: number}
+    // name → {lineTop: SVG line, lineBottom: SVG line, lastUpdateTime: number, lastKnownDist: number, speed: number}
     let riderLines = new Map();
+    let groupRects = []; // Array of group rectangle elements
 
     // ============================
     // OVERLAY
@@ -78,6 +86,97 @@
     }
 
     waitForElevGraph();
+
+    // ============================
+    // UPDATE ELEV-CURSOR COLORS
+    // ============================
+    let myLineTop = null;
+    let myLineBottom = null;
+
+    function updateElevCursorColors() {
+        const elevCursor = document.querySelector('.elev-cursor');
+        if (!elevCursor || !svg || !overlay) return;
+
+        const gm = window.gameManager;
+        if (!gm) return;
+
+        let helmetColor = "#ffffff";
+        let skinColor = "#ffffff";
+
+        // Get colors from ego or focalRider
+        if (gm.ego?.config?.design) {
+            helmetColor = gm.ego.config.design.helmet_color || "#ffffff";
+            skinColor = gm.ego.config.design.skin_color || "#ffffff";
+        } else if (gm.focalRider) {
+            const fId = gm.focalRider.athleteId || gm.focalRider.id;
+            const humans = gm.humans || {};
+            const focalHuman = humans[fId] || Object.values(humans).find(h => (h.athleteId || h.id) == fId);
+
+            if (focalHuman?.config?.design) {
+                helmetColor = focalHuman.config.design.helmet_color || "#ffffff";
+                skinColor = focalHuman.config.design.skin_color || "#ffffff";
+            }
+        }
+
+        // Create our lines if they don't exist
+        if (!myLineTop) {
+            myLineTop = document.createElementNS("http://www.w3.org/2000/svg", "line");
+            myLineBottom = document.createElementNS("http://www.w3.org/2000/svg", "line");
+            overlay.lineSVG.appendChild(myLineTop);
+            overlay.lineSVG.appendChild(myLineBottom);
+        }
+
+        // Get viewBox for coordinates
+        const viewBox = svg.getAttribute("viewBox");
+        if (!viewBox) return;
+
+        const parts = viewBox.split(' ').map(Number);
+        const minY = parts[1];
+        const viewWidth = parts[2];
+        const viewHeight = parts[3];
+        const midY = minY + (viewHeight / 2);
+        const strokeWidth = viewWidth * 0.002;
+
+        // Get position from CSS left (e.g., "calc(49.9993% - 1px)")
+        const leftStyle = elevCursor.style.left;
+        if (!leftStyle) return;
+
+        // Extract percentage from calc() or plain percentage
+        let percentage = 0;
+        const calcMatch = leftStyle.match(/calc\(([0-9.]+)%/);
+        if (calcMatch) {
+            percentage = parseFloat(calcMatch[1]);
+        } else {
+            const percentMatch = leftStyle.match(/([0-9.]+)%/);
+            if (percentMatch) {
+                percentage = parseFloat(percentMatch[1]);
+            } else {
+                return; // Can't parse position
+            }
+        }
+
+        // Convert percentage to SVG coordinates
+        const relativePos = percentage / 100; // 0 to 1
+        const xPos = parts[0] + (relativePos * viewWidth);
+
+        // Top half (helmet)
+        myLineTop.setAttribute('x1', xPos);
+        myLineTop.setAttribute('x2', xPos);
+        myLineTop.setAttribute('y1', minY);
+        myLineTop.setAttribute('y2', midY);
+        myLineTop.setAttribute('stroke', helmetColor);
+        myLineTop.setAttribute('stroke-width', strokeWidth);
+        myLineTop.style.display = 'block';
+
+        // Bottom half (skin)
+        myLineBottom.setAttribute('x1', xPos);
+        myLineBottom.setAttribute('x2', xPos);
+        myLineBottom.setAttribute('y1', midY);
+        myLineBottom.setAttribute('y2', minY + viewHeight);
+        myLineBottom.setAttribute('stroke', skinColor);
+        myLineBottom.setAttribute('stroke-width', strokeWidth);
+        myLineBottom.style.display = 'block';
+    }
 
     // ============================
     // READ EVERY RIDER POSITION
@@ -148,15 +247,23 @@
             const rawPercent = distInMeters / riderPathMeters;
 
             let helmetColor = "#ffffff";
+            let skinColor = "#ffffff";
+
             if (targetHuman?.config?.design?.helmet_color) {
                 helmetColor = targetHuman.config.design.helmet_color;
+            }
+
+            if (targetHuman?.config?.design?.skin_color) {
+                skinColor = targetHuman.config.design.skin_color;
             }
 
             positions.push({
                 name: r.name || String(r.riderId),
                 percent: rawPercent, // Value is 0.0 to 1.0 (Full route coordinate)
+                distMeters: distInMeters, // Actual distance in meters for grouping
                 speed: speedNormalized, // Value is percentage/second, sign-adjusted for display
                 helmetColor,
+                skinColor,
             });
         });
 
@@ -189,6 +296,44 @@
     }
 
     // ============================
+    // GROUP RIDERS BY PROXIMITY
+    // ============================
+    function findGroups(riders) {
+        if (riders.length === 0) return [];
+
+        // Sort riders by their percent position
+        const sorted = [...riders].sort((a, b) => a.percent - b.percent);
+        const groups = [];
+        let currentGroup = [sorted[0]];
+
+        const pathMeters = routeLength * 1000;
+
+        for (let i = 1; i < sorted.length; i++) {
+            const prevRider = sorted[i - 1];
+            const currRider = sorted[i];
+
+            // Calculate distance in meters between riders
+            const distDiff = Math.abs(currRider.distMeters - prevRider.distMeters);
+
+            if (distDiff <= GROUP_DISTANCE_METERS) {
+                currentGroup.push(currRider);
+            } else {
+                if (currentGroup.length >= 2) {
+                    groups.push(currentGroup);
+                }
+                currentGroup = [currRider];
+            }
+        }
+
+        // Don't forget the last group
+        if (currentGroup.length >= 2) {
+            groups.push(currentGroup);
+        }
+
+        return groups;
+    }
+
+    // ============================
     // DRAW ALL RIDERS
     // ============================
     function updateOverlay() {
@@ -207,33 +352,69 @@
 
         const parts = viewBox.split(' ').map(Number);
         const minX = parts[0];
+        const minY = parts[1];
         const viewWidth = parts[2];
-        const strokeWidth = viewWidth * 0.005;
+        const viewHeight = parts[3];
+        const strokeWidth = viewWidth * 0.002;
+        const midY = minY + (viewHeight / 2);
 
         const activeRiders = new Set(ridersRaw.map(r => r.name));
 
         // Cleanup old lines
         riderLines.forEach((entry, name) => {
             if (!activeRiders.has(name)) {
-                entry.line.remove();
+                entry.lineTop.remove();
+                entry.lineBottom.remove();
                 riderLines.delete(name);
             }
         });
 
-        // Update state and Draw lines
+        // Clear old group rectangles
+        groupRects.forEach(rect => rect.remove());
+        groupRects = [];
+
+        // Calculate predicted positions for all riders
+        const predictedRiders = [];
+
         ridersRaw.forEach(r => {
+            // Skip drawing for me/focal rider, but include position for grouping
+            if (r.isMe) {
+                // Get position from our colored cursor lines
+                let myPos = r.percent; // fallback
+
+                if (myLineTop) {
+                    const xFromLine = parseFloat(myLineTop.getAttribute('x1'));
+                    if (!isNaN(xFromLine)) {
+                        // Convert SVG x back to 0-1 percent
+                        myPos = (xFromLine - minX) / viewWidth;
+                        // Clamp to 0-1
+                        if (myPos < 0) myPos = 0;
+                        if (myPos > 1) myPos = 1;
+                    }
+                }
+
+                predictedRiders.push({
+                    ...r,
+                    predictedPos: myPos,
+                    entry: null // No visual element to update
+                });
+                return;
+            }
+
             let entry = riderLines.get(r.name);
 
             // 1. Initialization/State Update
             if (!entry) {
-                // New Rider Init
-                const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-                ov.lineSVG.appendChild(line);
-                line.setAttribute("y1", 0);
-                line.setAttribute("y2", 1);
+                // New Rider Init - create TWO lines
+                const lineTop = document.createElementNS("http://www.w3.org/2000/svg", "line");
+                const lineBottom = document.createElementNS("http://www.w3.org/2000/svg", "line");
+
+                ov.lineSVG.appendChild(lineTop);
+                ov.lineSVG.appendChild(lineBottom);
 
                 entry = {
-                    line,
+                    lineTop,
+                    lineBottom,
                     lastUpdateTime: now,
                     lastKnownDist: r.percent,
                     speed: r.speed
@@ -256,34 +437,93 @@
             if (predictedPos > 1.0) predictedPos = predictedPos % 1.0;
             if (predictedPos < 0.0) predictedPos = 1.0 + predictedPos;
 
+            // Store predicted position with rider data
+            predictedRiders.push({
+                ...r,
+                predictedPos,
+                entry
+            });
+        });
+
+        // Find groups based on predicted positions
+        const groups = findGroups(predictedRiders.map(pr => ({
+            ...pr,
+            percent: pr.predictedPos,
+            distMeters: pr.predictedPos * routeLength * 1000
+        })));
+
+        // Draw group rectangles FIRST (so they appear behind the lines)
+        groups.forEach(group => {
+            const minPos = Math.min(...group.map(r => r.percent));
+            const maxPos = Math.max(...group.map(r => r.percent));
+
+            // Check if any part of the group is visible
+            const groupStartRelative = (minPos - minX) / viewWidth;
+            const groupEndRelative = (maxPos - minX) / viewWidth;
+
+            if (groupEndRelative >= -0.05 && groupStartRelative <= 1.05) {
+                const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+                rect.setAttribute("x", minPos);
+                rect.setAttribute("y", 0);
+                rect.setAttribute("width", maxPos - minPos);
+                rect.setAttribute("height", 1);
+                rect.setAttribute("fill", GROUP_RECT_COLOR);
+                rect.setAttribute("stroke", GROUP_RECT_BORDER);
+                rect.setAttribute("stroke-width", strokeWidth * 0.5);
+
+                console.log(`[Group] Drawing rect at x=${minPos.toFixed(4)}, width=${(maxPos - minPos).toFixed(4)}, riders:`, group.length);
+
+                // Insert at the beginning so it's behind the lines
+                ov.lineSVG.insertBefore(rect, ov.lineSVG.firstChild);
+                groupRects.push(rect);
+            }
+        });
+
+        // Now draw individual rider lines
+        predictedRiders.forEach(pr => {
+            // Skip drawing for main rider (game draws them)
+            if (pr.isMe || !pr.entry) return;
+
+            const { predictedPos, entry, helmetColor, skinColor } = pr;
+
             // 3. Visibility and Drawing
-
-            // Calculate position relative to the start of the visible view (minX)
             const positionRelativeToViewStart = predictedPos - minX;
-
-            // Normalized position to the view's width (0.0 = left edge, 1.0 = right edge)
             const normalizedRelativePosition = positionRelativeToViewStart / viewWidth;
 
             // Check if marker is outside the view (slightly padded)
             if (normalizedRelativePosition < -0.05 || normalizedRelativePosition > 1.05) {
-                entry.line.style.display = 'none';
+                entry.lineTop.style.display = 'none';
+                entry.lineBottom.style.display = 'none';
                 return;
             }
 
             // The X coordinate is the absolute position (0.0 to 1.0) on the full route.
             const xAbsolute = predictedPos;
 
-            entry.line.style.display = 'block';
+            entry.lineTop.style.display = 'block';
+            entry.lineBottom.style.display = 'block';
 
-            entry.line.setAttribute("x1", xAbsolute);
-            entry.line.setAttribute("x2", xAbsolute);
-            entry.line.setAttribute("stroke-width", strokeWidth);
-            entry.line.setAttribute("stroke", (r.helmetColor && r.helmetColor.startsWith("#")) ? r.helmetColor : "white");
+            // Top half: from top to middle (helmet color)
+            entry.lineTop.setAttribute("x1", xAbsolute);
+            entry.lineTop.setAttribute("x2", xAbsolute);
+            entry.lineTop.setAttribute("y1", minY);
+            entry.lineTop.setAttribute("y2", midY);
+            entry.lineTop.setAttribute("stroke-width", strokeWidth);
+            entry.lineTop.setAttribute("stroke", (helmetColor && helmetColor.startsWith("#")) ? helmetColor : "white");
+
+            // Bottom half: from middle to bottom (skin color)
+            entry.lineBottom.setAttribute("x1", xAbsolute);
+            entry.lineBottom.setAttribute("x2", xAbsolute);
+            entry.lineBottom.setAttribute("y1", midY);
+            entry.lineBottom.setAttribute("y2", minY + viewHeight);
+            entry.lineBottom.setAttribute("stroke-width", strokeWidth);
+            entry.lineBottom.setAttribute("stroke", (skinColor && skinColor.startsWith("#")) ? skinColor : "white");
         });
     }
 
     // Set the refresh rate faster for smoother movement
     setInterval(() => {
+        updateElevCursorColors();
         updateOverlay();
     }, 1000 / 60); // Aiming for ~60 FPS update rate
 
