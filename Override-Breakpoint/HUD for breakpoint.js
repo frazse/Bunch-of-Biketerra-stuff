@@ -13,10 +13,6 @@
 
 (function() {
     'use strict';
-// ===== USER CONFIG =====
-const LOCAL_RIDER_NAME = "SET-YOUR-NAME";   // <-- Used ONLY when you are actually riding (Ego exists)
-// =======================
-
 // --- Global Function to Handle Spectate Click ---
 window.spectateRiderById = function(riderId) {
     console.warn("Spectate disabled on non-spectate pages.");
@@ -163,17 +159,13 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
 
         riders.forEach(r => {
             // --- UPDATED NAME LOGIC ---
-            let name;
-            if (r.isMe) {
-                if (ego) {
-                    name = LOCAL_RIDER_NAME;
-                } else {
-                    name = r.name || "Spectating";
-                }
-            } else {
-                name = r.name || "Unknown";
-            }
-            // --------------------------
+let name;
+if (r.isMe && ego) {
+    name = ego.name || r.name || "You";
+} else {
+    name = r.name || "Unknown";
+}
+// --------------------------
 
             const dist = r.lapDistance.toFixed(2);
             const speed = (r.speed * 3.6).toFixed(1);
