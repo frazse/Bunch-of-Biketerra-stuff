@@ -7,8 +7,6 @@ Paste the code below, change SET_YOUR_NAME to yourown name and hit enter
 (if you do this you need to keep the console open for the data to update.)
 You can also use Override/local-override but I havent tried that so ymmv
 ###################################################
-/* FINAL LOCATION-INDEPENDENT BREAKPOINT CODE */
-/* FINAL, GUARANTEED BREAKPOINT CODE (V4.0 - FIXES STARTUP RESET) */
 // 1. Get the raw sources
 const others = this.humansList || [];
 const me = this.focalRider;
@@ -39,12 +37,14 @@ const INIT_DISTANCE_LIMIT = 100; // Ignore drops when distance is near the start
 const myDistance = me ? me.currentPathDistance : 0;
 
 // 6. Map riders
+const ef = window.gameManager.ego.userData.first_name;
+const el = window.gameManager.ego.userData.last_name
 window.hackedRiders = allRiders.map(r => {
     const c = r.config || {};
     const f = c.first_name || "";
     const l = c.last_name || "";
     let fullName = (f + " " + l).trim();
-    if (!fullName && r === me) fullName = "ME (Local User)";
+    if (!fullName && r === me) fullName = (ef + " " + el).trim();
 
     const watts = r.power || 0;
     const weightInGrams = c.weight || 103000; 
