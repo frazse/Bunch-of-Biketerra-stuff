@@ -38,6 +38,20 @@
     // ============================
     // OVERLAY
     // ============================
+        function waitFor(selector, timeout=10000) {
+        return new Promise((resolve, reject)=>{
+            const t = setTimeout(()=>reject("Timeout "+selector), timeout);
+            const check = ()=>{
+                const el = document.querySelector(selector);
+                if(el){ clearTimeout(t); resolve(el); } else requestAnimationFrame(check);
+            };
+            check();
+        });
+    }
+    waitFor(".panel-auxiliary").then(el => {
+        if(el) el.style.paddingBottom = '20px';
+    }).catch(() => {});
+
     function createOverlay() {
         const elevGraph = document.querySelector('.elev-graph');
         if (!elevGraph) return null;
@@ -497,7 +511,6 @@
                 badge.style.height = '22px';
                 badge.style.borderRadius = '50%';
                 badge.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-               // badge.style.border = '2px solid black';
                 badge.style.display = 'flex';
                 badge.style.alignItems = 'center';
                 badge.style.justifyContent = 'center';
