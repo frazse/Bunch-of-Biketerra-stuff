@@ -54,12 +54,7 @@
     waitFor(".view-toggle").then(el => {
         if(el) el.style.display = 'none';
     }).catch(() => {});
-    waitFor(".rider-list-footer").then(el => {
-        if(el) {
-            el.style.paddingTop = '.1rem';
-            el.style.paddingRight = '.3rem';
-        }
-    }).catch(() => {});
+
 const hudObserver = new MutationObserver(() => {
     const hud = document.querySelector(".hud-bottom");
     if (hud) hud.style.left = "40%";
