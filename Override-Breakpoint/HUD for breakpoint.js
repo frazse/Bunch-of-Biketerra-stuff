@@ -13,6 +13,80 @@
 
 (function() {
     'use strict';
+
+    // Store athleteId => teamName
+    window.__tttTeamMap = {};
+    window.__tttDataLoaded = false;
+
+    const originalFetch = window.fetch;
+    window.fetch = async function(input, init) {
+        const response = await originalFetch(input, init);
+
+        try {
+            const url = input?.url || input?.toString();
+            if (url.includes('__data.json')) {
+                const cloned = response.clone();
+                const dataText = await cloned.text();
+
+                // Parse the main JSON response
+                let json;
+                try {
+                    json = JSON.parse(dataText);
+                } catch (e) {
+                    console.error("Failed to parse __data.json:", e);
+                    return response;
+                }
+
+                // Look inside nodes if present
+                const nodesArr = json.nodes || [];
+                let found = false;
+
+                nodesArr.forEach(node => {
+                    const arr = node.data || node; // sometimes node itself is array
+
+                    arr.forEach((item, idx) => {
+                        if (item === "ttt") {
+                            // Grab next few items to find the teams JSON
+                            const potentialTeams = arr.slice(idx + 1, idx + 5);
+                            const teamsString = potentialTeams.find(s => {
+                                try {
+                                    const o = JSON.parse(s);
+                                    return typeof o === 'object' && Object.values(o).some(t => t?.name && Array.isArray(t?.members));
+                                } catch (e) {
+                                    return false;
+                                }
+                            });
+
+                            if (!teamsString) return;
+
+                            try {
+                                const teamsObj = JSON.parse(teamsString);
+                                Object.values(teamsObj).forEach(team => {
+                                    if (Array.isArray(team.members)) {
+                                        team.members.forEach(id => {
+                                            window.__tttTeamMap[id.toString()] = team.name;
+                                        });
+                                    }
+                                });
+                                window.__tttDataLoaded = true;
+                                console.log("🏁 TTT teams loaded:", window.__tttTeamMap);
+                                found = true;
+                            } catch (err) {
+                                console.error("TTT JSON parse error:", err, teamsString);
+                            }
+                        }
+                    });
+                });
+
+                if (!found) console.log("No TTT teams found in __data.json nodes");
+            }
+        } catch (e) {
+            console.error("Error intercepting __data.json:", e);
+        }
+
+        return response;
+    };
+
 // --- Global Function to Handle Spectate Click ---
 window.spectateRiderById = function(riderId) {
     console.warn("Spectate disabled on non-spectate pages.");
@@ -76,7 +150,7 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
         position: fixed;
         top: 8px;
         right: 8px;
-        width: 20vw;
+        width: 25vw;
         min-width: 350px;
         background: rgba(0,0,0,0.5);
         color: #00ffcc;
@@ -106,7 +180,7 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
         <table style="width:100%; border-collapse:collapse;">
             <thead>
                 <tr style="text-align:left; color:#fff;">
-                    <th style="padding:2px;">Name</th>
+                    <th style="padding:2px; width:30%;">Name</th>
                     <th style="padding:2px;">Power</th>
                     <th style="padding:2px;">Speed</th>
                     <th style="padding:2px;">W/kg</th>
@@ -407,43 +481,79 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
             });
             if (currentGroup.length > 0) groups.push(currentGroup);
 
-            groups.forEach((group, groupIdx) => {
-                const groupSize = group.length;
-                const avgSpeed = (group.reduce((sum, r) => sum + r.speed, 0) / groupSize * 3.6).toFixed(1);
-                const groupId = `group-${groupIdx}`;
+let chaseCounter = 1;
+let stragglersCounter = 1;
 
-                // Default to expanded if not explicitly collapsed
-                const isExpanded = !expandedGroups.has(groupId + '-collapsed');
+// Find largest group (Peloton)
+let largestGroupSize = Math.max(...groups.map(g => g.length));
 
-                if (groupSize === 1) {
-                    html += renderRiderRow(group[0], referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj);
-                } else {
-                    const arrow = isExpanded ? '▲' : '▼';
-                    const displayStyle = isExpanded ? '' : 'none';
+groups.forEach((group, groupIdx) => {
+    const groupSize = group.length;
+    const avgSpeed = (group.reduce((sum, r) => sum + r.speed, 0) / groupSize * 3.6).toFixed(1);
+    const groupId = `group-${groupIdx}`;
+    const isExpanded = !expandedGroups.has(groupId + '-collapsed');
 
-                    html += `
-                        <tr style="background:rgba(255,255,255,0.15); cursor:pointer; font-family:'Overpass',sans-serif;"
-                            onclick="event.stopPropagation(); window.toggleGroup('${groupId}');">
-                            <td colspan="7" style="padding:6px; color:#fff; font-weight:bold; font-family:'Overpass',sans-serif;">
-                                ${arrow} Group of ${groupSize} (${avgSpeed} kph)
-                            </td>
-                        </tr>
-                        <tr style="display:${displayStyle};">
-                            <td colspan="7" style="padding:0;">
-                                <table style="width:100%; border-collapse:collapse;">
-                    `;
+    // Compute lap-adjusted distance
+    const groupLeadDist = Math.max(...group.map(r => r.lapDistance + (r.lap-1)*10000));
+    const referenceDistAdjusted = referenceDist + (referenceLap-1)*10000;
 
-                    group.forEach(r => {
-                        html += renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj);
-                    });
+    let groupLabel = "";
 
-                    html += `
-                                </table>
-                            </td>
-                        </tr>
-                    `;
-                }
-            });
+    if (groupSize === largestGroupSize) {
+        groupLabel = `Peloton - ${groupSize} rider${groupSize>1?'s':''}`;
+    } else if (groupLeadDist > referenceDistAdjusted) {
+        groupLabel = `Breakaway - ${groupSize} rider${groupSize>1?'s':''}`;
+    } else if (groupLeadDist < referenceDistAdjusted && groupLeadDist >= referenceDistAdjusted - 200) {
+        groupLabel = `Chase Group ${chaseCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
+    } else {
+        groupLabel = `Stragglers Group ${stragglersCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
+    }
+
+    // TTT team detection
+    let tttTeamName = null;
+    if (window.__tttDataLoaded && group.length > 1) {
+        const teamNames = new Set(
+            group
+                .map(r => window.__tttTeamMap[String(r.riderId)])
+                .filter(Boolean)
+        );
+        if (teamNames.size === 1) tttTeamName = [...teamNames][0];
+    }
+
+    const displayLabel = tttTeamName || groupLabel;
+
+    const arrow = isExpanded ? '▲' : '▼';
+    const displayStyle = isExpanded ? '' : 'none';
+
+    if (groupSize === 1) {
+        html += renderRiderRow(group[0], referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj);
+    } else {
+        html += `
+            <tr style="background:rgba(255,255,255,0.15); cursor:pointer; font-family:'Overpass',sans-serif;"
+                onclick="event.stopPropagation(); window.toggleGroup('${groupId}');">
+                <td colspan="7" style="padding:6px; color:#fff; font-weight:bold;">
+                    ${arrow} ${displayLabel} (${avgSpeed} kph)
+                </td>
+            </tr>
+            <tr style="display:${displayStyle};">
+                <td colspan="7" style="padding:0;">
+                    <table style="width:100%; border-collapse:collapse;">
+        `;
+
+        group.forEach(r => {
+            html += renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj);
+        });
+
+        html += `
+                    </table>
+                </td>
+            </tr>
+        `;
+    }
+
+    html += `<tr style="height:4px;"><td colspan="7"></td></tr>`;
+});
+
         } else {
             riders.forEach(r => {
                 html += renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj);
