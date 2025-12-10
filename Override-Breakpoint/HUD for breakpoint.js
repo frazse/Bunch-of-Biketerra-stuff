@@ -140,7 +140,7 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
         waitFor(".rider-list-footer").then(el => {
         if(el) {
             el.style.paddingTop = '.3rem';
-            el.style.paddingRight = '2.5rem';
+            el.style.paddingRight = '.4rem';
         }
     }).catch(() => {});
 
