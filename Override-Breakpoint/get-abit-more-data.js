@@ -117,6 +117,3 @@ window.hackedRiders = allRiders.map(r => {
 
 
 false; // don't pause
-
-
-false; // don't pause
