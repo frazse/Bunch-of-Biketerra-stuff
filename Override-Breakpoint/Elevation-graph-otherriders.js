@@ -111,90 +111,79 @@
     let myLineTop = null;
     let myLineBottom = null;
 
-    function updateElevCursorColors() {
-        const elevCursor = document.querySelector('.elev-cursor');
-        if (!elevCursor || !svg || !overlay) return;
+function updateElevCursorColors() {
+    const elevCursor = document.querySelector('.elev-cursor');
+    if (!elevCursor || !svg || !overlay) return;
 
-        const gm = window.gameManager;
-        if (!gm) return;
+    if (!window.hackedRiders) return;
 
-        let helmetColor = "#ffffff";
-        let skinColor = "#ffffff";
+    // Find our own rider
+    const meRider = window.hackedRiders.find(r => r.isMe);
+    if (!meRider) return;
 
-        // Get colors from ego or focalRider
-        if (gm.ego?.config?.design) {
-            helmetColor = gm.ego.config.design.helmet_color || "#ffffff";
-            skinColor = gm.ego.config.design.skin_color || "#ffffff";
-        } else if (gm.focalRider) {
-            const fId = gm.focalRider.athleteId || gm.focalRider.id;
-            const humans = gm.humans || {};
-            const focalHuman = humans[fId] || Object.values(humans).find(h => (h.athleteId || h.id) == fId);
+    const helmetColor = meRider.helmet || "#ffffff";
+    const skinColor = meRider.skin || "#ffffff";
 
-            if (focalHuman?.config?.design) {
-                helmetColor = focalHuman.config.design.helmet_color || "#ffffff";
-                skinColor = focalHuman.config.design.skin_color || "#ffffff";
-            }
-        }
-
-        // Create our lines if they don't exist
-        if (!myLineTop) {
-            myLineTop = document.createElementNS("http://www.w3.org/2000/svg", "line");
-            myLineBottom = document.createElementNS("http://www.w3.org/2000/svg", "line");
-            overlay.lineSVG.appendChild(myLineTop);
-            overlay.lineSVG.appendChild(myLineBottom);
-        }
-
-        // Get viewBox for coordinates
-        const viewBox = svg.getAttribute("viewBox");
-        if (!viewBox) return;
-
-        const parts = viewBox.split(' ').map(Number);
-        const minY = parts[1];
-        const viewWidth = parts[2];
-        const viewHeight = parts[3];
-        const midY = minY + (viewHeight / 2);
-        const strokeWidth = viewWidth * 0.002;
-
-        // Get position from CSS left (e.g., "calc(49.9993% - 1px)")
-        const leftStyle = elevCursor.style.left;
-        if (!leftStyle) return;
-
-        // Extract percentage from calc() or plain percentage
-        let percentage = 0;
-        const calcMatch = leftStyle.match(/calc\(([0-9.]+)%/);
-        if (calcMatch) {
-            percentage = parseFloat(calcMatch[1]);
-        } else {
-            const percentMatch = leftStyle.match(/([0-9.]+)%/);
-            if (percentMatch) {
-                percentage = parseFloat(percentMatch[1]);
-            } else {
-                return; // Can't parse position
-            }
-        }
-
-        // Convert percentage to SVG coordinates
-        const relativePos = percentage / 100; // 0 to 1
-        const xPos = parts[0] + (relativePos * viewWidth);
-
-        // Top half (helmet)
-        myLineTop.setAttribute('x1', xPos);
-        myLineTop.setAttribute('x2', xPos);
-        myLineTop.setAttribute('y1', minY);
-        myLineTop.setAttribute('y2', midY);
-        myLineTop.setAttribute('stroke', helmetColor);
-        myLineTop.setAttribute('stroke-width', strokeWidth);
-        myLineTop.style.display = 'block';
-
-        // Bottom half (skin)
-        myLineBottom.setAttribute('x1', xPos);
-        myLineBottom.setAttribute('x2', xPos);
-        myLineBottom.setAttribute('y1', midY);
-        myLineBottom.setAttribute('y2', minY + viewHeight);
-        myLineBottom.setAttribute('stroke', skinColor);
-        myLineBottom.setAttribute('stroke-width', strokeWidth);
-        myLineBottom.style.display = 'block';
+    // Create our lines if they don't exist
+    if (!myLineTop) {
+        myLineTop = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        myLineBottom = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        overlay.lineSVG.appendChild(myLineTop);
+        overlay.lineSVG.appendChild(myLineBottom);
     }
+
+    // Hide the original elev-cursor line
+    elevCursor.style.display = 'none';
+
+    // Get viewBox for coordinates
+    const viewBox = svg.getAttribute("viewBox");
+    if (!viewBox) return;
+
+    const parts = viewBox.split(' ').map(Number);
+    const minY = parts[1];
+    const viewWidth = parts[2];
+    const viewHeight = parts[3];
+    const midY = minY + (viewHeight / 2);
+    const strokeWidth = viewWidth * 0.003;
+
+    // Get position from CSS left (e.g., "calc(49.9993% - 1px)")
+    const leftStyle = elevCursor.style.left;
+    if (!leftStyle) return;
+
+    let percentage = 0;
+    const calcMatch = leftStyle.match(/calc\(([0-9.]+)%/);
+    if (calcMatch) {
+        percentage = parseFloat(calcMatch[1]);
+    } else {
+        const percentMatch = leftStyle.match(/([0-9.]+)%/);
+        if (percentMatch) {
+            percentage = parseFloat(percentMatch[1]);
+        } else {
+            return; // Can't parse position
+        }
+    }
+
+    const relativePos = percentage / 100; // 0 to 1
+    const xPos = parts[0] + (relativePos * viewWidth);
+
+    // Top half (helmet)
+    myLineTop.setAttribute('x1', xPos);
+    myLineTop.setAttribute('x2', xPos);
+    myLineTop.setAttribute('y1', minY);
+    myLineTop.setAttribute('y2', midY);
+    myLineTop.setAttribute('stroke', helmetColor);
+    myLineTop.setAttribute('stroke-width', strokeWidth);
+    myLineTop.style.display = 'block';
+
+    // Bottom half (skin)
+    myLineBottom.setAttribute('x1', xPos);
+    myLineBottom.setAttribute('x2', xPos);
+    myLineBottom.setAttribute('y1', midY);
+    myLineBottom.setAttribute('y2', minY + viewHeight);
+    myLineBottom.setAttribute('stroke', skinColor);
+    myLineBottom.setAttribute('stroke-width', strokeWidth);
+    myLineBottom.style.display = 'block';
+}
 
     // ============================
     // READ EVERY RIDER POSITION
@@ -267,13 +256,9 @@
             let helmetColor = "#ffffff";
             let skinColor = "#ffffff";
 
-            if (targetHuman?.config?.design?.helmet_color) {
-                helmetColor = targetHuman.config.design.helmet_color;
-            }
+            if (r.helmet) helmetColor = r.helmet;
+            if (r.skin)   skinColor = r.skin;
 
-            if (targetHuman?.config?.design?.skin_color) {
-                skinColor = targetHuman.config.design.skin_color;
-            }
 
             positions.push({
                 name: r.name || String(r.riderId),
@@ -373,7 +358,7 @@
         const minY = parts[1];
         const viewWidth = parts[2];
         const viewHeight = parts[3];
-        const strokeWidth = viewWidth * 0.002;
+        const strokeWidth = viewWidth * 0.003;
         const midY = minY + (viewHeight / 2);
 
         const activeRiders = new Set(ridersRaw.map(r => r.name));
