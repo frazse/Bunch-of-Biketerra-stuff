@@ -7,6 +7,7 @@ Paste the code below, change SET_YOUR_NAME to yourown name and hit enter
 (if you do this you need to keep the console open for the data to update.)
 You can also use Override/local-override but I havent tried that so ymmv
 ###################################################
+
 // 1. Get the raw sources
 const others = this.humansList || [];
 const me = this.focalRider;
@@ -60,6 +61,10 @@ window.hackedRiders = allRiders.map(r => {
     const weightInGrams = c.weight || 103000; 
     const weightInKg = weightInGrams > 0 ? weightInGrams / 1000 : 103;
     const wkg = weightInKg > 0 ? watts / weightInKg : 0;
+    const design = r.entity?.design || {};
+    const hcolor = design.helmet_color;
+    const scolor = design.skin_color;
+
 
     const dist = r.currentPathDistance || 0;
     const riderId = r.athleteId || r.id; 
@@ -107,7 +112,9 @@ window.hackedRiders = allRiders.map(r => {
         speed: r.speed,
         power: watts,
         isMe: r === me,
-        riderId: riderId
+        riderId: riderId,
+        helmet: hcolor,
+        skin: scolor
     };
 });
 
