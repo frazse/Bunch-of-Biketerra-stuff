@@ -51,9 +51,7 @@
     }
 
     waitFor(".elev-cursor").then(()=>{ start3DViewer(); }).catch(console.error);
-    waitFor(".view-toggle").then(el => {
-        if(el) el.style.display = 'none';
-    }).catch(() => {});
+
 
 const hudObserver = new MutationObserver(() => {
     const hud = document.querySelector(".hud-bottom");
