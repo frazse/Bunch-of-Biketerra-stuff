@@ -41,81 +41,82 @@ const myDistance = me ? me.currentPathDistance : 0;
 // 👇 FIX: Use optional chaining to safely access ego.userData, preventing crash if spectating
 const ef = window.gameManager.ego?.userData?.first_name || "";
 const el = window.gameManager.ego?.userData?.last_name || "";
+
+// Outside your map/loop, create a global object once
+window.__totalDistMap = window.__totalDistMap || {};
+
 window.hackedRiders = allRiders.map(r => {
-    const c = r.config || {};
-    const f = c.first_name || "";
-    const l = c.last_name || "";
-    let fullName = (f + " " + l).trim();
-    
-    // If the rider is the current focal rider (me) but lacks a name in their config,
-    // use the (safely extracted) ego name as a fallback.
-    if (!fullName && r === me) {
+    const c = r.config || {};
+    const f = c.first_name || "";
+    const l = c.last_name || "";
+    let fullName = (f + " " + l).trim();
+
+    if (!fullName && r === me) {
         fullName = (ef + " " + el).trim();
     }
-    // Final fallback if name is still empty
-    if (!fullName) {
-        fullName = "Unknown Rider";
-    }
+    if (!fullName) fullName = "Unknown Rider";
 
-    const watts = r.power || 0;
-    const weightInGrams = c.weight || 103000; 
-    const weightInKg = weightInGrams > 0 ? weightInGrams / 1000 : 103;
-    const wkg = weightInKg > 0 ? watts / weightInKg : 0;
+    const watts = r.power || 0;
+    const weightInGrams = c.weight || 103000; 
+    const weightInKg = weightInGrams > 0 ? weightInGrams / 1000 : 103;
+    const wkg = weightInKg > 0 ? watts / weightInKg : 0;
     const design = r.entity?.design || {};
     const hcolor = design.helmet_color;
     const scolor = design.skin_color;
+    const path = r.currentPath;
+    const pathID = path.id;
 
+    const dist = r.currentPathDistance || 0;
+    const riderId = r.athleteId || r.id; 
 
-    const dist = r.currentPathDistance || 0;
-    const riderId = r.athleteId || r.id; 
+    // --- TOTAL DISTANCE TRACKING ---
+    window.__totalDistMap = window.__totalDistMap || {};
+    if (!window.__totalDistMap[riderId]) {
+        window.__totalDistMap[riderId] = { total: 0, lastDist: dist };
+    }
+    let delta = dist - window.__totalDistMap[riderId].lastDist;
+    if (delta < 0) delta = 0; // ignore resets
+    window.__totalDistMap[riderId].total += delta;
+    window.__totalDistMap[riderId].lastDist = dist;
+    const totaldist = window.__totalDistMap[riderId].total;
+    // ------------------------------
 
-    // Initialize rider lap tracker
-    if (!window.__lapTracker[riderId]) {
-        window.__lapTracker[riderId] = {
-            lap: 1,
-            lastDist: dist,
-            // FIX: Set to true once we pass the initial 'jump' phase
-            isInitialized: false 
-        };
-    }
+    // --- LAP TRACKER (unchanged) ---
+    if (!window.__lapTracker[riderId]) {
+        window.__lapTracker[riderId] = { lap: 1, lastDist: dist, isInitialized: false };
+    }
+    const tracker = window.__lapTracker[riderId];
+    if (!tracker.isInitialized) {
+        if (dist < INIT_DISTANCE_LIMIT && dist >= 0) {
+            tracker.isInitialized = true;
+            tracker.lastDist = dist;
+        }
+    } else {
+        if (dist < tracker.lastDist - LAP_THRESHOLD) tracker.lap++;
+        tracker.lastDist = dist;
+    }
+    const lapDistance = dist >= 0 ? dist : (dist + tracker.lastDist + LAP_THRESHOLD);
 
-    const tracker = window.__lapTracker[riderId];
-    
-    // --- LAP TRACKING LOGIC ---
-    if (!tracker.isInitialized) {
-        // 1. On startup, check if the distance is stable (i.e., near zero or after a reset).
-        if (dist < INIT_DISTANCE_LIMIT && dist >= 0) {
-            tracker.isInitialized = true;
-            tracker.lastDist = dist;
-        }
-    } else {
-        // 2. Only track drops once initialized
-        if (dist < tracker.lastDist - LAP_THRESHOLD) { 
-            tracker.lap++;
-        }
-        // 3. Always update lastDist once tracking is active
-        tracker.lastDist = dist;
-    }
-    
-    // --- END LAP TRACKING LOGIC ---
-
-    // Compute lap distance
-    const lapDistance = dist >= 0 ? dist : (dist + tracker.lastDist + LAP_THRESHOLD); 
-
-    return {
-        name: fullName, // Use the safely determined full name
-        dist: dist,
-        lap: tracker.lap,
-        lapDistance: lapDistance,
-        wkg: wkg,
-        distanceFromMe: dist - myDistance,
-        speed: r.speed,
-        power: watts,
-        isMe: r === me,
-        riderId: riderId,
+    return {
+        name: fullName,
+        dist: dist,
+        lap: tracker.lap,
+        lapDistance: lapDistance,
+        totaldist: totaldist,       // <-- now available
+        wkg: wkg,
+        distanceFromMe: dist - myDistance,
+        speed: r.speed,
+        power: watts,
+        isMe: r === me,
+        riderId: riderId,
         helmet: hcolor,
-        skin: scolor
-    };
+        skin: scolor,
+        pathID: pathID,
+    };
 });
+
+
+false; // don't pause
+
 
 false; // don't pause
