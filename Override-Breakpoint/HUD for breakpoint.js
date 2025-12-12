@@ -368,6 +368,11 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
         const ego = gm?.ego;
         const focalRiderObj = gm?.focalRider;
 
+// --- 1. Get Global Map Info first ---
+        const globalRoad = ego?.currentPath?.road || focalRiderObj?.currentPath?.road;
+        const globalLapLimit = globalRoad?.pathA?.distance || globalRoad?.pathB?.distance || 10000; // Default 10k
+        const globalIsLooped = globalRoad?.looped ?? true;
+
         riders.forEach(r => {
             const dist = r.dist;
             const id = r.riderId;
@@ -375,70 +380,72 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
             if (!window.__lapTracker[id]) {
                 window.__lapTracker[id] = {
                     lap: 1,
-                    lastDist: dist,
-                    lastRoadId: null,
-                    initialized: false // Track if we've set initial road
+                    lastDist: null,
+                    lastPathId: null,
+                    initialized: false,
+                    cooldown: 0
                 };
             }
 
             const tracker = window.__lapTracker[id];
-            const lapDistance = getLapDistance(id, gm);
+            if (tracker.cooldown > 0) tracker.cooldown--;
 
-            // Get current road ID
-            let currentRoadId = null;
-            let human = null;
+            // Find specific human for Path ID checks (A<->B)
+            let human = (ego && (ego.athleteId === id || ego.id === id)) ? ego :
+                        (focalRiderObj && (focalRiderObj.athleteId === id || focalRiderObj.id === id)) ? focalRiderObj :
+                        (gm?.humans?.[id]);
+            const pathId = human?.currentPath?.id;
 
-            if (ego && (ego.athleteId === id || ego.id === id)) {
-                human = ego;
-            } else if (focalRiderObj && (focalRiderObj.athleteId === id || focalRiderObj.id === id)) {
-                human = focalRiderObj;
-            } else if (gm?.humans?.[id]) {
-                human = gm.humans[id];
-            } else if (gm?.humans) {
-                for (const h of Object.values(gm.humans)) {
-                    if ((h.athleteId || h.id) === id) {
-                        human = h;
-                        break;
+            let lapTriggered = false;
+
+            // --- 2. DETECTION LOGIC ---
+            if (tracker.lastDist !== null) {
+                if (globalIsLooped) {
+                    // LOOP DETECTION
+                    // Trigger if: (Currently at start) AND (Was previously at the end)
+                    // This is safer than a "Massive Drop" which can be skipped by lag
+                    const isNowAtStart = dist < 250;
+                    const wasJustAtEnd = tracker.lastDist > (globalLapLimit - 500);
+
+                    if (isNowAtStart && wasJustAtEnd && tracker.cooldown === 0) {
+                        lapTriggered = true;
+                    }
+
+                    // FALLBACK: If we missed the "At Start" window due to a lag spike,
+                    // check for the "Massive Drop" (>50% of the map)
+                    if (!lapTriggered && (tracker.lastDist - dist) > (globalLapLimit * 0.5) && tracker.cooldown === 0) {
+                        lapTriggered = true;
+                    }
+                } else {
+                    // A<->B DETECTION (Path switch)
+                    if (pathId !== undefined && pathId !== null && tracker.lastPathId !== null) {
+                        if (pathId !== tracker.lastPathId && tracker.cooldown === 0) {
+                            lapTriggered = true;
+                        }
                     }
                 }
             }
 
-            if (human?.currentPath?.road) {
-                currentRoadId = human.currentPath.road.id;
+            // --- 3. HANDLE LAP ---
+            if (lapTriggered) {
+                tracker.lap++;
+                tracker.cooldown = 20;
+                console.log(`🏁 LAP ${tracker.lap} | ${r.name || id} | ${globalIsLooped ? 'Loop' : 'A↔B'} (Map: ${Math.round(globalLapLimit)}m)`);
             }
 
-            // Initialize lastRoadId on first detection
-            if (!tracker.initialized && currentRoadId !== null) {
-                tracker.lastRoadId = currentRoadId;
+            // --- 4. STATE UPDATE ---
+            if (!tracker.initialized && dist !== null) {
                 tracker.initialized = true;
-            }
-
-            // Lap detection: distance is near the lap distance (within 50m)
-            if (lapDistance && currentRoadId !== null && tracker.initialized) {
-                const wasNearFinish = tracker.lastDist && Math.abs(tracker.lastDist - lapDistance) < 50;
-                const isNearStart = dist < 50;
-
-                // Detect lap completion:
-                // Option 1: Loop route - stayed on same road, was near finish, now near start
-                // Option 2: A->B route - road ID changed (swapped direction)
-                const sameRoadLoop = (currentRoadId === tracker.lastRoadId) && wasNearFinish && isNearStart;
-                const roadSwitch = (currentRoadId !== tracker.lastRoadId && tracker.lastDist > 100);
-
-                if (sameRoadLoop || roadSwitch) {
-                    tracker.lap++;
-                    console.log(`🏁 LAP ${tracker.lap}! Rider ${id} | Road: ${tracker.lastRoadId}→${currentRoadId} | ${sameRoadLoop ? 'LOOP' : 'A↔B'} | LapDist: ${lapDistance?.toFixed(1)} | LastDist: ${tracker.lastDist?.toFixed(1)} | Dist: ${dist.toFixed(1)}`);
-                }
-
-                tracker.lastRoadId = currentRoadId;
+                console.log(`📡 Tracker engaged for ${r.name || id}. Start Dist: ${dist}m`);
             }
 
             tracker.lastDist = dist;
+            tracker.lastPathId = pathId;
             r.lap = tracker.lap;
             r.lapDistance = dist >= 0 ? dist : 0;
 
             if (tracker.lap > leaderLap) leaderLap = tracker.lap;
         });
-
         riders.sort((a, b) => {
             if (b.lap !== a.lap) return b.lap - a.lap;
             return b.lapDistance - a.lapDistance;
