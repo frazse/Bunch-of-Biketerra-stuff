@@ -143,6 +143,9 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
             el.style.paddingRight = '.4rem';
         }
     }).catch(() => {});
+        waitFor(".view-toggle").then(el => {
+        if(el) el.style.display = 'none';
+    }).catch(() => {});
 
     // --- HUD Container ---
     const container = document.createElement('div');
@@ -273,6 +276,9 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
         } else {
             name = r.name || "Unknown";
         }
+const highlightStyle = r.isMe
+    ? "outline: 2px solid #FF6262; outline-offset: -2px; box-shadow: 0 0 4px #FF6262;"
+    : "";
 
         const dist = r.lapDistance.toFixed(2);
         const speed = (r.speed * 3.6).toFixed(1);
@@ -335,11 +341,13 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
             bgColor = `rgba(${rC},${gC},${bC},0.6)`;
         }
 
-        const rowStyle = `
-            border-bottom:1px solid #333;
-            background:${bgColor};
-            cursor:${r.isMe ? "default" : "pointer"};
-        `;
+const rowStyle = `
+    border-bottom:1px solid #333;
+    background:${bgColor};
+    cursor:${r.isMe ? "default" : "pointer"};
+    ${highlightStyle}
+`;
+
 
         return `
             <tr style="${rowStyle}" onclick="window.spectateRiderById(${r.riderId || 0})">
