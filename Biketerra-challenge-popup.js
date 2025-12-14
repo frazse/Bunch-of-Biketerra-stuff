@@ -1,13 +1,12 @@
 // ==UserScript==
 // @name         BikeTerra Challenge List
 // @namespace    http://tampermonkey.net/
-// @version      1.5
-// @description  Fetch data from dashboard in background for Ride page support with original styling
+// @version      1.8
+// @description  Restored Original Styling + HUD Integration + Dashboard Fetch
 // @author       You
 // @match        https://biketerra.com/*
 // @match        https://www.biketerra.com/*
 // @exclude      https://biketerra.com/spectate*
-// @icon          https://www.google.com/s2/favicons?sz=64&domain=biketerra.com
 // @grant        GM_xmlhttpRequest
 // @connect      api.biketerra.com
 // @connect      biketerra.com
@@ -18,13 +17,12 @@
 
     const API_URL = 'https://api.biketerra.com/challenge/list';
 
-    // 1. DATA EXTRACTION (Handles text from scripts or background fetch)
+    // 1. DATA EXTRACTION
     function parseBikeTerraText(text) {
         let data = { token: null, challenges: {} };
         if (text.includes('data:{user:{')) {
             const tokenMatch = text.match(/token\s*:\s*"([^"]+)"/);
             if (tokenMatch) data.token = tokenMatch[1];
-
             const challengeRegex = /"(\d+)"\s*:\s*\{[^{}]*?pct\s*:\s*(\d+)/g;
             let match;
             while ((match = challengeRegex.exec(text)) !== null) {
@@ -34,16 +32,12 @@
         return data;
     }
 
-    // 2. BACKGROUND DASHBOARD FETCH (Used when data is missing on current page)
     async function getBikeTerraData() {
-        // First try the current page
         const scripts = document.querySelectorAll('script');
         for (const script of scripts) {
             const parsed = parseBikeTerraText(script.textContent);
             if (parsed.token) return parsed;
         }
-
-        // If not found (like on /ride), fetch from dashboard in background
         return new Promise((resolve) => {
             GM_xmlhttpRequest({
                 method: 'GET',
@@ -64,7 +58,7 @@
         });
     }
 
-    // 3. VISIBILITY & API LOGIC
+    // 2. VISIBILITY & API
     function isChallengeVisible(challenge) {
         const now = new Date();
         const from = new Date(challenge.valid_from + 'T00:00:00');
@@ -97,13 +91,12 @@
         return { results: merged };
     }
 
-    // 4. ORIGINAL STYLE UI ELEMENTS
+    // 3. ORIGINAL STYLE PROGRESS BAR
     function createProgressBar(percentage, goal, isDistance) {
         const currentRaw = (percentage / 100) * goal;
         const unit = isDistance ? 'km' : 'm';
         const displayCurrent = isDistance ? (currentRaw / 1000).toFixed(1) : Math.round(currentRaw).toLocaleString();
         const displayGoal = isDistance ? (goal / 1000).toLocaleString() : goal.toLocaleString();
-
         const container = document.createElement('div');
         container.style.cssText = `margin-top: 10px; clear: both;`;
         container.innerHTML = `
@@ -112,11 +105,11 @@
                 <div style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold; color: ${percentage > 50 ? 'white' : '#333'};">
                     ${displayCurrent}${unit} / ${displayGoal}${unit} (${percentage.toFixed(1)}%)
                 </div>
-            </div>
-        `;
+            </div>`;
         return container;
     }
 
+    // 4. DISPLAY WIDGET (RE-RESTORED ORIGINAL STYLE)
     async function displayChallenges(challenges, pageData) {
         const container = document.createElement('div');
         container.id = 'biketerra-challenges-widget';
@@ -124,9 +117,8 @@
             position: fixed; top: 8px; left: 8px;
             background: rgba(0,0,0,0.5); border-radius: 8px;
             padding: 15px; max-width: 600px; max-height: 600px;
-            overflow-y: auto; z-index: 99999; font-family: "Overpass", sans-serif;
-            transition: opacity 1s ease;
-        `;
+            overflow-y: auto; z-index: 999999; font-family: "Overpass", sans-serif;
+            transition: opacity 1s ease;`;
 
         const visibleChallenges = challenges.results.filter(isChallengeVisible);
 
@@ -140,8 +132,7 @@
             challengeDiv.style.cssText = `
                 margin-bottom: 15px; padding: 12px;
                 background: rgba(255,255,255,0.7); border-radius: 6px;
-                cursor: pointer; transition: background 0.2s;
-            `;
+                cursor: pointer; transition: background 0.2s;`;
             challengeDiv.onmouseover = () => challengeDiv.style.background = '#ebebeb';
             challengeDiv.onmouseout = () => challengeDiv.style.background = 'rgba(255,255,255,0.7)';
             challengeDiv.onclick = () => window.open(`https://biketerra.com/challenges/${challenge.id}`, '_blank');
@@ -149,8 +140,7 @@
             const timestamp = challenge.updated_on.replace(/[^0-9]/g, '');
             const imageHTML = challenge.has_image ? `
                 <img src="https://biketerra.nyc3.cdn.digitaloceanspaces.com/challenges/${challenge.id}.webp?${timestamp}"
-                     style="width: 20%; aspect-ratio: 1/1; object-fit: cover; border-radius: 6px; float: left; margin-right: 12px;">
-            ` : '';
+                     style="width: 20%; aspect-ratio: 1/1; object-fit: cover; border-radius: 6px; float: left; margin-right: 12px;">` : '';
 
             const goalText = isDistance ? `${(goal/1000).toLocaleString()}km distance` : `${goal.toLocaleString()}m elevation`;
 
@@ -162,8 +152,7 @@
                     <p style="margin: 5px 0; font-size: 13px;"><strong>Goal:</strong> ${goalText}</p>
                     <p style="margin: 5px 0; font-size: 13px;"><strong>Period:</strong> ${challenge.valid_from} to ${challenge.valid_to}</p>
                 </div>
-                <div style="clear: both"></div>
-            `;
+                <div style="clear: both"></div>`;
 
             if (goal > 0) {
                 challengeDiv.insertBefore(createProgressBar(percentage, goal, isDistance), challengeDiv.querySelector('[style*="clear: both"]'));
@@ -172,52 +161,53 @@
         }
         document.body.appendChild(container);
 
-        // Auto-hide after 15 seconds
         setTimeout(() => {
             const el = document.getElementById('biketerra-challenges-widget');
-            if (el) {
-                el.style.opacity = "0";
-                setTimeout(() => el.remove(), 1000);
-            }
+            if (el) { el.style.opacity = "0"; setTimeout(() => el.remove(), 1000); }
         }, 15000);
     }
 
-    // 5. MAIN EXECUTION
     async function runChallengeFlow() {
         const existing = document.getElementById('biketerra-challenges-widget');
         if (existing) { existing.remove(); return; }
-
         const pageData = await getBikeTerraData();
-        if (!pageData.token) {
-            console.log('[BikeTerra] Token not found even on dashboard.');
-            return;
-        }
-
+        if (!pageData.token) return;
         const challenges = await fetchAllChallenges(pageData.token);
         await displayChallenges(challenges, pageData);
     }
 
+    // 5. BUTTON & HUD
     function addChallengeButton() {
-        if (document.getElementById('biketerra-challenges-btn')) return;
-        const button = document.createElement('button');
-        button.id = 'biketerra-challenges-btn';
-        button.textContent = '🚴 Challenges';
-        button.style.cssText = `position: fixed; bottom: 20px; right: 20px; background: #4CAF50; color: white; border: none; border-radius: 25px; padding: 12px 24px; font-size: 16px; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.2); z-index: 9999; font-weight: bold;`;
+        const actionPanel = document.querySelector('.panel-action-buttons');
+        const editBtn = document.querySelector('.action-button.action-edit');
+        let button = document.getElementById('biketerra-challenges-btn');
 
-        button.onclick = async () => {
-            button.disabled = true;
-            await runChallengeFlow();
-            button.disabled = false;
-        };
-        document.body.appendChild(button);
+        if (actionPanel && editBtn) {
+            if (button && !actionPanel.contains(button)) { button.remove(); button = null; }
+            if (!button) {
+                button = document.createElement('div');
+                button.id = 'biketerra-challenges-btn';
+                button.className = 'action-button svelte-1wfcwp8';
+                button.innerHTML = `<img class="action-icon svelte-1wfcwp8" src="/images/ico-eye.svg" alt="🚴">`;
+                actionPanel.insertBefore(button, editBtn);
+                button.onclick = runChallengeFlow;
+            }
+        } else if (!button) {
+            button = document.createElement('button');
+            button.id = 'biketerra-challenges-btn';
+            button.textContent = '🚴 Challenges';
+            button.style.cssText = `position: fixed; bottom: 20px; right: 20px; background: #4CAF50; color: white; border: none; border-radius: 25px; padding: 12px 24px; font-size: 16px; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.2); z-index: 9999; font-weight: bold;`;
+            document.body.appendChild(button);
+            button.onclick = runChallengeFlow;
+        }
     }
 
-    // Init
+    const observer = new MutationObserver(addChallengeButton);
+    observer.observe(document.body, { childList: true, subtree: true });
+
     setTimeout(() => {
         addChallengeButton();
-        if (window.location.pathname.includes('/ride')) {
-             runChallengeFlow();
-        }
+        if (window.location.pathname.includes('/ride')) runChallengeFlow();
     }, 1500);
 
 })();
