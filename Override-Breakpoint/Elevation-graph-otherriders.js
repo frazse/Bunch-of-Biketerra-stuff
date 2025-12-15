@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra Elevation Graph Multi Rider
 // @namespace    http://tampermonkey.net/
-// @version      2.3
-// @description  Two-color rider lines with group highlighting and counter
+// @version      2.4
+// @description  Two-color rider lines with group highlighting and counter (fixed direction grouping)
 // @author       Josef
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate/*
@@ -14,7 +14,7 @@
 
 (function () {
     'use strict';
-    console.log("[LeaderOverlay v2.3] Script started with group counter feature.");
+    console.log("[LeaderOverlay v2.4] Script started with fixed direction grouping.");
 
     // ============================
     // CONFIGURATION
@@ -110,6 +110,7 @@
     // ============================
     let myLineTop = null;
     let myLineBottom = null;
+    let myPathId = null;
 
 function updateElevCursorColors() {
     const elevCursor = document.querySelector('.elev-cursor');
@@ -206,6 +207,9 @@ function updateElevCursorColors() {
             }
         }
 
+        // Store the subject's path ID for grouping logic
+        myPathId = subjectPathId;
+
         const fallbackPathMeters = routeLength * 1000;
         const positions = [];
 
@@ -267,6 +271,7 @@ function updateElevCursorColors() {
                 speed: speedNormalized, // Value is percentage/second, sign-adjusted for display
                 helmetColor,
                 skinColor,
+                pathId: riderPathId, // Track which direction they're going (ORIGINAL, not subject's)
             });
         });
 
@@ -318,7 +323,10 @@ function updateElevCursorColors() {
             // Calculate distance in meters between riders
             const distDiff = Math.abs(currRider.distMeters - prevRider.distMeters);
 
-            if (distDiff <= GROUP_DISTANCE_METERS) {
+            // Only group riders if they are:
+            // 1. Within GROUP_DISTANCE_METERS of each other
+            // 2. Going in the SAME direction (same pathId)
+            if (distDiff <= GROUP_DISTANCE_METERS && currRider.pathId === prevRider.pathId) {
                 currentGroup.push(currRider);
             } else {
                 if (currentGroup.length > 1) {
@@ -382,7 +390,7 @@ function updateElevCursorColors() {
         const predictedRiders = [];
 
         // First, add the main rider position from the colored cursor lines
-        if (myLineTop) {
+        if (myLineTop && myPathId !== null) {
             const xFromLine = parseFloat(myLineTop.getAttribute('x1'));
             if (!isNaN(xFromLine)) {
                 // Convert SVG x to normalized 0-1 position
@@ -396,7 +404,8 @@ function updateElevCursorColors() {
                     predictedPos: myPos,
                     distMeters: myDistMeters,
                     entry: null, // No visual element to update
-                    isMe: true
+                    isMe: true,
+                    pathId: myPathId // Use the subject's path ID
                 });
             }
         }
@@ -441,7 +450,7 @@ function updateElevCursorColors() {
             if (predictedPos > 1.0) predictedPos = predictedPos % 1.0;
             if (predictedPos < 0.0) predictedPos = 1.0 + predictedPos;
 
-            // Store predicted position with rider data
+            // Store predicted position with rider data (including pathId)
             predictedRiders.push({
                 ...r,
                 predictedPos,
