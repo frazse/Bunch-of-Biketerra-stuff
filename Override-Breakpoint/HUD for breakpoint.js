@@ -475,101 +475,112 @@ const rowStyle = `
 
         let html = '';
 
-        if (isGroupView) {
-            const groups = [];
-            let currentGroup = [];
+if (isGroupView) {
+    const groups = [];
+    let currentGroup = [];
 
-            riders.forEach((r, idx) => {
-                if (currentGroup.length === 0) {
-                    currentGroup.push(r);
-                } else {
-                    const lastRider = currentGroup[currentGroup.length - 1];
-                    const gap = lastRider.lapDistance - r.lapDistance;
-
-                    if (gap <= GROUP_DISTANCE && r.lap === lastRider.lap) {
-                        currentGroup.push(r);
-                    } else {
-                        groups.push([...currentGroup]);
-                        currentGroup = [r];
-                    }
-                }
-            });
-            if (currentGroup.length > 0) groups.push(currentGroup);
-
-let chaseCounter = 1;
-let stragglersCounter = 1;
-
-// Find largest group (Peloton)
-let largestGroupSize = Math.max(...groups.map(g => g.length));
-
-groups.forEach((group, groupIdx) => {
-    const groupSize = group.length;
-    const avgSpeed = (group.reduce((sum, r) => sum + r.speed, 0) / groupSize * 3.6).toFixed(1);
-    const groupId = `group-${groupIdx}`;
-    const isExpanded = !expandedGroups.has(groupId + '-collapsed');
-
-    // Compute lap-adjusted distance
-    const groupLeadDist = Math.max(...group.map(r => r.lapDistance + (r.lap-1)*10000));
-    const referenceDistAdjusted = referenceDist + (referenceLap-1)*10000;
-
-    let groupLabel = "";
-
-    if (groupSize === largestGroupSize) {
-        groupLabel = `Peloton - ${groupSize} rider${groupSize>1?'s':''}`;
-    } else if (groupLeadDist > referenceDistAdjusted) {
-        groupLabel = `Breakaway - ${groupSize} rider${groupSize>1?'s':''}`;
-    } else if (groupLeadDist < referenceDistAdjusted && groupLeadDist >= referenceDistAdjusted - 200) {
-        groupLabel = `Chase Group ${chaseCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
-    } else {
-        groupLabel = `Stragglers Group ${stragglersCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
-    }
-
-    // TTT team detection
-    let tttTeamName = null;
-    if (window.__tttDataLoaded && group.length > 1) {
-        const teamNames = new Set(
-            group
-                .map(r => window.__tttTeamMap[String(r.riderId)])
-                .filter(Boolean)
-        );
-        if (teamNames.size === 1) tttTeamName = [...teamNames][0];
-    }
-
-    const displayLabel = tttTeamName || groupLabel;
-
-    const arrow = isExpanded ? '▲' : '▼';
-    const displayStyle = isExpanded ? '' : 'none';
-
-    if (groupSize === 1) {
-        html += renderRiderRow(group[0], referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj);
-    } else {
-        html += `
-            <tr style="background:rgba(255,255,255,0.15); cursor:pointer; font-family:'Overpass',sans-serif;"
-                onclick="event.stopPropagation(); window.toggleGroup('${groupId}');">
-                <td colspan="7" style="padding:6px; color:#fff; font-weight:bold;">
-                    ${arrow} ${displayLabel} (${avgSpeed} kph)
-                </td>
-            </tr>
-            <tr style="display:${displayStyle};">
-                <td colspan="7" style="padding:0;">
-                    <table style="width:100%; border-collapse:collapse;">
-        `;
-
-        group.forEach(r => {
-            html += renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj);
-        });
-
-        html += `
-                    </table>
-                </td>
-            </tr>
-        `;
-    }
-
-    html += `<tr style="height:4px;"><td colspan="7"></td></tr>`;
-});
-
+    // --- 1. Build groups based on distance ---
+    riders.forEach((r, idx) => {
+        if (currentGroup.length === 0) {
+            currentGroup.push(r);
         } else {
+            const lastRider = currentGroup[currentGroup.length - 1];
+            const gap = lastRider.lapDistance - r.lapDistance;
+
+            if (gap <= GROUP_DISTANCE && r.lap === lastRider.lap) {
+                currentGroup.push(r);
+            } else {
+                groups.push([...currentGroup]);
+                currentGroup = [r];
+            }
+        }
+    });
+    if (currentGroup.length > 0) groups.push(currentGroup);
+
+    // --- 2. Compute lead distance for each group ---
+    groups.forEach(g => {
+        g.leadDist = Math.max(...g.map(r => r.lapDistance + (r.lap - 1) * 10000));
+    });
+
+    // --- 3. Identify Breakaway (front-most group) ---
+    groups.sort((a, b) => b.leadDist - a.leadDist); // Front first
+    let breakaway = groups[0];
+
+    // --- 4. Identify Peloton (largest group) ---
+    let peloton = groups.reduce((max, g) => g.length > max.length ? g : max, groups[0]);
+
+    // --- 5. Ensure only 1 Peloton ---
+    if (breakaway.length > peloton.length) {
+        let temp = peloton;
+        peloton = breakaway;
+        breakaway = temp;
+    }
+
+    // --- 6. Render groups ---
+    let chaseCounter = 1;
+    let stragglersCounter = 1;
+
+    groups.forEach((group, groupIdx) => {
+        const groupSize = group.length;
+        const avgSpeed = (group.reduce((sum, r) => sum + r.speed, 0) / groupSize * 3.6).toFixed(1);
+        const groupId = `group-${groupIdx}`;
+        const isExpanded = !expandedGroups.has(groupId + '-collapsed');
+
+        // Determine group label
+        let groupLabel = "";
+        if (group === breakaway) groupLabel = `Breakaway - ${groupSize} rider${groupSize>1?'s':''}`;
+        else if (group === peloton) groupLabel = `Peloton - ${groupSize} rider${groupSize>1?'s':''}`;
+        else if (group.leadDist < breakaway.leadDist && group.leadDist > peloton.leadDist) {
+            groupLabel = `Chase Group ${chaseCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
+        } else {
+            groupLabel = `Stragglers ${stragglersCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
+        }
+
+        // TTT team detection
+        if (window.__tttDataLoaded && group.length > 1) {
+            const teamNames = new Set(
+                group
+                    .map(r => window.__tttTeamMap[String(r.riderId)])
+                    .filter(Boolean)
+            );
+            if (teamNames.size === 1) groupLabel = [...teamNames][0];
+        }
+
+        const arrow = isExpanded ? '▲' : '▼';
+        const displayStyle = isExpanded ? '' : 'none';
+
+        if (groupSize === 1) {
+            html += renderRiderRow(group[0], referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj);
+        } else {
+            html += `
+                <tr style="background:rgba(255,255,255,0.15); cursor:pointer; font-family:'Overpass',sans-serif;"
+                    onclick="event.stopPropagation(); window.toggleGroup('${groupId}');">
+                    <td colspan="7" style="padding:6px; color:#fff; font-weight:bold;">
+                        ${arrow} ${groupLabel} (${avgSpeed} kph)
+                    </td>
+                </tr>
+                <tr style="display:${displayStyle};">
+                    <td colspan="7" style="padding:0;">
+                        <table style="width:100%; border-collapse:collapse;">
+            `;
+
+            group.forEach(r => {
+                html += renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj);
+            });
+
+            html += `
+                        </table>
+                    </td>
+                </tr>
+            `;
+        }
+
+        html += `<tr style="height:4px;"><td colspan="7"></td></tr>`;
+    });
+}
+
+
+       else {
             riders.forEach(r => {
                 html += renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj);
             });
