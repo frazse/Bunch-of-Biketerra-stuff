@@ -227,6 +227,54 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
     // --- Lap tracking state ---
     window.__lapTracker = window.__lapTracker || {};
 
+    // --- Interpolation state for smoother updates ---
+    window.__riderInterpolation = window.__riderInterpolation || {};
+
+    function interpolateRider(riderId, currentDist, currentSpeed, isMe) {
+        // Don't interpolate your own rider - use real-time data
+        if (isMe) {
+            window.__riderInterpolation[riderId] = {
+                lastDist: currentDist,
+                lastSpeed: currentSpeed,
+                lastUpdate: Date.now(),
+                interpolatedDist: currentDist
+            };
+            return currentDist;
+        }
+
+        const now = Date.now();
+
+        if (!window.__riderInterpolation[riderId]) {
+            window.__riderInterpolation[riderId] = {
+                lastDist: currentDist,
+                lastSpeed: currentSpeed,
+                lastUpdate: now,
+                interpolatedDist: currentDist
+            };
+            return currentDist;
+        }
+
+        const interp = window.__riderInterpolation[riderId];
+        const timeSinceUpdate = now - interp.lastUpdate;
+
+        // Check if we have new data (distance changed)
+        if (currentDist !== interp.lastDist) {
+            // New data received, reset interpolation
+            interp.lastDist = currentDist;
+            interp.lastSpeed = currentSpeed;
+            interp.lastUpdate = now;
+            interp.interpolatedDist = currentDist;
+            return currentDist;
+        }
+
+        // No new data, interpolate based on last known speed
+        // Speed is in m/s, time is in ms, so: distance = speed * (time / 1000)
+        const interpolatedDistance = interp.lastDist + (interp.lastSpeed * (timeSinceUpdate / 1000));
+        interp.interpolatedDist = interpolatedDistance;
+
+        return interpolatedDistance;
+    }
+
     // --- Get lap distance for a rider ---
     function getLapDistance(riderId, gm) {
         if (!gm) return null;
@@ -382,8 +430,11 @@ const rowStyle = `
         const globalIsLooped = globalRoad?.looped ?? true;
 
         riders.forEach(r => {
-            const dist = r.dist;
+            const rawDist = r.dist;
             const id = r.riderId;
+
+            // Apply interpolation to smooth out position updates
+            const dist = interpolateRider(id, rawDist, r.speed, r.isMe);
 
             if (!window.__lapTracker[id]) {
                 window.__lapTracker[id] = {
@@ -547,33 +598,27 @@ if (isGroupView) {
         }
 
         const arrow = isExpanded ? '▲' : '▼';
-        const displayStyle = isExpanded ? '' : 'none';
 
-        if (groupSize === 1) {
-            html += renderRiderRow(group[0], referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj);
-        } else {
-            html += `
-                <tr style="background:rgba(255,255,255,0.15); cursor:pointer; font-family:'Overpass',sans-serif;"
-                    onclick="event.stopPropagation(); window.toggleGroup('${groupId}');">
-                    <td colspan="7" style="padding:6px; color:#fff; font-weight:bold;">
-                        ${arrow} ${groupLabel} (${avgSpeed} kph)
-                    </td>
-                </tr>
-                <tr style="display:${displayStyle};">
-                    <td colspan="7" style="padding:0;">
-                        <table style="width:100%; border-collapse:collapse;">
-            `;
+        // Always show group header
+        html += `
+            <tr style="background:rgba(255,255,255,0.15); cursor:pointer; font-family:'Overpass',sans-serif;"
+                onclick="event.stopPropagation(); window.toggleGroup('${groupId}');">
+                <td colspan="7" style="padding:6px; color:#fff; font-weight:bold;">
+                    ${arrow} ${groupLabel} (${avgSpeed} kph)
+                </td>
+            </tr>
+        `;
 
-            group.forEach(r => {
-                html += renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj);
-            });
-
-            html += `
-                        </table>
-                    </td>
-                </tr>
-            `;
-        }
+        // Render each rider in the group with proper display toggle
+        group.forEach(r => {
+            const riderRow = renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj);
+            // Add display style to the row if group is collapsed
+            if (!isExpanded) {
+                html += riderRow.replace('<tr style="', '<tr style="display:none; ');
+            } else {
+                html += riderRow;
+            }
+        });
 
         html += `<tr style="height:4px;"><td colspan="7"></td></tr>`;
     });
