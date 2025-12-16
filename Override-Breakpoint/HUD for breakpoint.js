@@ -159,15 +159,15 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
         color: #00ffcc;
         font-family: "Overpass", sans-serif;
         font-size: 12px;
-        padding: 10px;
+        padding: 4px 10px 10px 10px;
         z-index: 1;
         border-radius: 8px;
         max-height: 60vh;
         overflow-y: auto;
     `;
     container.innerHTML = `
-        <div style="display:flex; align-items:center;">
-            <span id="status-light" style="color:red;">●</span>
+        <div style="display:flex; align-items:center; margin-bottom:2px; height:16px;">
+            <span id="status-light" style="color:red; font-size:12px; line-height:1;">●</span>
             <button id="view-toggle" style="
                 background:rgba(255,255,255,0);
                 color:#fff;
@@ -176,8 +176,10 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
                 font-family:'Overpass',sans-serif;
                 font-size:16px;
                 outline:none;
-                margin-top: -5px;
-
+                padding:0;
+                margin:0;
+                line-height:1;
+                height:16px;
             ">🗊</button>
         </div>
         <table style="width:100%; border-collapse:collapse;">
