@@ -167,14 +167,14 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
     `;
     container.innerHTML = `
         <div style="display:flex; align-items:center; margin-bottom:2px; height:16px;">
-            <span id="status-light" style="color:red; font-size:12px; line-height:1;">●</span>
+            <span id="status-light" style="color:red; font-size:10px; line-height:1;">●</span>
             <button id="view-toggle" style="
                 background:rgba(255,255,255,0);
                 color:#fff;
                 border:none;
                 cursor:pointer;
                 font-family:'Overpass',sans-serif;
-                font-size:16px;
+                font-size:14px;
                 outline:none;
                 padding:0;
                 margin:0;
@@ -319,7 +319,7 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
     }
 
     // --- Rider row renderer ---
-    function renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj) {
+    function renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit) {
         let name;
         if (r.isMe && ego) {
             name = ego.name || r.name || "You";
@@ -340,9 +340,19 @@ const highlightStyle = r.isMe
         if (r.riderId === referenceRiderId) {
             gapText = "0m";
         } else if (r.lap !== referenceLap) {
+            // Calculate actual distance gap using lap information
             const lapDiff = r.lap - referenceLap;
-            if (lapDiff > 0) gapText = `+${lapDiff} Lap${lapDiff > 1 ? "s" : ""}`;
-            else gapText = `${lapDiff} Lap`;
+
+            // Calculate total distance traveled for each rider
+            // For the reference rider: (laps completed * lap distance) + current lap distance
+            const referenceTotalDist = (referenceLap - 1) * globalLapLimit + referenceDist;
+            const riderTotalDist = (r.lap - 1) * globalLapLimit + r.lapDistance;
+
+            const gapMeters = riderTotalDist - referenceTotalDist;
+
+            if (gapMeters === 0) gapText = "0m";
+            else if (gapMeters > 0) gapText = `+${Math.round(gapMeters)}m`;
+            else gapText = `${Math.round(gapMeters)}m`;
         } else {
             const gapMeters = r.lapDistance - referenceDist;
             if (gapMeters === 0) gapText = "0m";
@@ -613,7 +623,7 @@ if (isGroupView) {
 
         // Render each rider in the group with proper display toggle
         group.forEach(r => {
-            const riderRow = renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj);
+            const riderRow = renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit);
             // Add display style to the row if group is collapsed
             if (!isExpanded) {
                 html += riderRow.replace('<tr style="', '<tr style="display:none; ');
@@ -629,7 +639,7 @@ if (isGroupView) {
 
        else {
             riders.forEach(r => {
-                html += renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj);
+                html += renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit);
             });
         }
 
