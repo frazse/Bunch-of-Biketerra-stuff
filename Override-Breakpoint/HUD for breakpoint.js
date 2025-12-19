@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra - Riderlist replacement HUD
 // @namespace    http://tampermonkey.net/
-// @version      11.7
-// @description  Fixed lap detection using actual game path data
+// @version      12.0
+// @description  Using native game lapCount instead of custom lap detection
 // @author       You
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate*
@@ -226,9 +226,6 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
         }
     };
 
-    // --- Lap tracking state ---
-    window.__lapTracker = window.__lapTracker || {};
-
     // --- Interpolation state for smoother updates ---
     window.__riderInterpolation = window.__riderInterpolation || {};
 
@@ -436,10 +433,9 @@ const rowStyle = `
         const ego = gm?.ego;
         const focalRiderObj = gm?.focalRider;
 
-// --- 1. Get Global Map Info first ---
+        // --- Get Global Map Info ---
         const globalRoad = ego?.currentPath?.road || focalRiderObj?.currentPath?.road;
         const globalLapLimit = globalRoad?.pathA?.distance || globalRoad?.pathB?.distance || 10000; // Default 10k
-        const globalIsLooped = globalRoad?.looped ?? true;
 
         riders.forEach(r => {
             const rawDist = r.dist;
@@ -448,75 +444,15 @@ const rowStyle = `
             // Apply interpolation to smooth out position updates
             const dist = interpolateRider(id, rawDist, r.speed, r.isMe);
 
-            if (!window.__lapTracker[id]) {
-                window.__lapTracker[id] = {
-                    lap: 1,
-                    lastDist: null,
-                    lastPathId: null,
-                    initialized: false,
-                    cooldown: 0
-                };
-            }
+            // Use native lapCount from Biketerra (starts at 0, so add 1 for display)
+            // The lap count is already set in the breakpoint, just use it directly
+            const displayLap = r.lap; // Already incremented in breakpoint (+1)
 
-            const tracker = window.__lapTracker[id];
-            if (tracker.cooldown > 0) tracker.cooldown--;
-
-            // Find specific human for Path ID checks (A<->B)
-            let human = (ego && (ego.athleteId === id || ego.id === id)) ? ego :
-                        (focalRiderObj && (focalRiderObj.athleteId === id || focalRiderObj.id === id)) ? focalRiderObj :
-                        (gm?.humans?.[id]);
-            const pathId = human?.currentPath?.id;
-
-            let lapTriggered = false;
-
-            // --- 2. DETECTION LOGIC ---
-            if (tracker.lastDist !== null) {
-                if (globalIsLooped) {
-                    // LOOP DETECTION
-                    // Trigger if: (Currently at start) AND (Was previously at the end)
-                    // This is safer than a "Massive Drop" which can be skipped by lag
-                    const isNowAtStart = dist < 250;
-                    const wasJustAtEnd = tracker.lastDist > (globalLapLimit - 500);
-
-                    if (isNowAtStart && wasJustAtEnd && tracker.cooldown === 0) {
-                        lapTriggered = true;
-                    }
-
-                    // FALLBACK: If we missed the "At Start" window due to a lag spike,
-                    // check for the "Massive Drop" (>50% of the map)
-                    if (!lapTriggered && (tracker.lastDist - dist) > (globalLapLimit * 0.5) && tracker.cooldown === 0) {
-                        lapTriggered = true;
-                    }
-                } else {
-                    // A<->B DETECTION (Path switch)
-                    if (pathId !== undefined && pathId !== null && tracker.lastPathId !== null) {
-                        if (pathId !== tracker.lastPathId && tracker.cooldown === 0) {
-                            lapTriggered = true;
-                        }
-                    }
-                }
-            }
-
-            // --- 3. HANDLE LAP ---
-            if (lapTriggered) {
-                tracker.lap++;
-                tracker.cooldown = 20;
-                console.log(`🏁 LAP ${tracker.lap} | ${r.name || id} | ${globalIsLooped ? 'Loop' : 'A↔B'} (Map: ${Math.round(globalLapLimit)}m)`);
-            }
-
-            // --- 4. STATE UPDATE ---
-            if (!tracker.initialized && dist !== null) {
-                tracker.initialized = true;
-                console.log(`📡 Tracker engaged for ${r.name || id}. Start Dist: ${dist}m`);
-            }
-
-            tracker.lastDist = dist;
-            tracker.lastPathId = pathId;
-            r.lap = tracker.lap;
             r.lapDistance = dist >= 0 ? dist : 0;
 
-            if (tracker.lap > leaderLap) leaderLap = tracker.lap;
+            if (displayLap > leaderLap) leaderLap = displayLap;
         });
+
         riders.sort((a, b) => {
             if (b.lap !== a.lap) return b.lap - a.lap;
             return b.lapDistance - a.lapDistance;
