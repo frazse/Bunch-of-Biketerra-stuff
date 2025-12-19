@@ -11,7 +11,6 @@ You can also use Override/local-override but I havent tried that so ymmv
 // Initialize globals
 window.hackedRiders = window.hackedRiders || [];
 window.__totalDistMap = window.__totalDistMap || {};
-window.__lapTracker = window.__lapTracker || {};
 window.__riderMap = window.__riderMap || new Map();
 
 // Expose game manager
@@ -70,24 +69,14 @@ for (const rider of allRiders) {
     }
     window.__totalDistMap[riderId].lastDist = dist;
     
-    // Lap tracking
-    if (!window.__lapTracker[riderId]) {
-        window.__lapTracker[riderId] = { lap: 1, lastDist: dist, isInitialized: false };
-    }
-    const tracker = window.__lapTracker[riderId];
-    if (!tracker.isInitialized && dist < 100 && dist >= 0) {
-        tracker.isInitialized = true;
-        tracker.lastDist = dist;
-    } else if (tracker.isInitialized && dist < tracker.lastDist - 1000) {
-        tracker.lap++;
-    }
-    tracker.lastDist = dist;
+    // Use native lap tracking from Biketerra
+    const lapCount = rider.lapCount || 1;
     
     // Store in map with timestamp
     window.__riderMap.set(riderId, {
         name: fullName,
         dist: dist,
-        lap: tracker.lap,
+        lap: lapCount,
         lapDistance: dist >= 0 ? dist : 0,
         totaldist: window.__totalDistMap[riderId].total,
         wkg: wkg,
@@ -113,5 +102,4 @@ for (const [id, rider] of window.__riderMap.entries()) {
 
 // Update the array
 window.hackedRiders = Array.from(window.__riderMap.values());
-
 false;
