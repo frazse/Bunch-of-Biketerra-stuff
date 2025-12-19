@@ -70,7 +70,7 @@ for (const rider of allRiders) {
     window.__totalDistMap[riderId].lastDist = dist;
     
     // Use native lap tracking from Biketerra
-    const lapCount = rider.lapCount || 1;
+const lapCount = (rider.lapCount || 0) + 1;   
     
     // Store in map with timestamp
     window.__riderMap.set(riderId, {
