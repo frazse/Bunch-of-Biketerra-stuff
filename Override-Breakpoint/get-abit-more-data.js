@@ -122,13 +122,14 @@ if (this.riderController) {
 // Check if we should use this fallback breakpoint
 // Only use it if the main breakpoint hasn't run recently (no other riders present)
 const now = Date.now();
-const lastMainBreakpointUpdate = window.__riderMap.size > 0 
+const lastMainBreakpointUpdate = window.__riderMap.size > 1 
     ? Math.max(...Array.from(window.__riderMap.values()).map(r => r._timestamp))
     : 0;
-const mainBreakpointIsActive = (now - lastMainBreakpointUpdate) < 1000;
+const mainBreakpointIsActive = (now - lastMainBreakpointUpdate) < 2000; // Increased to 2 seconds
 
-if (!mainBreakpointIsActive) {
-    // Main breakpoint isn't active - we're alone, use riderController data
+// ONLY run fallback if we have 1 or fewer riders (solo mode)
+if (!mainBreakpointIsActive && window.__riderMap.size <= 1) {
+    // Main breakpoint isn't active AND we're alone - use riderController data
     window.__usingFallbackBreakpoint = true;
     
     const me = this.focalRider || this.ego;
