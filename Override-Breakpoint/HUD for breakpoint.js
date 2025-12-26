@@ -752,18 +752,22 @@ if (r.isMe && window.gameManager?.ego?.userData?.ftp) {
     ftp = window.__athleteFtpMap[r.riderId];
 }
 
-// Compute W/kg color
+// Compute W/kg color based on Zwift power zones
 if (ftp && r.power) {
     const ratio = r.power / ftp;
 
-    if (ratio >= 1.30) wkgColor = '#ff4444';      // >130% FTP
-    else if (ratio >= 1.10) wkgColor = '#ff9900'; // VO2
-    else if (ratio >= 0.95) wkgColor = '#ffcc00'; // Threshold
-    else wkgColor = '#00ff88';                    // Easy
+    if (ratio >= 1.18) wkgColor = '#ff4444';      // Zone 6 (Red, Anaerobic): >118%
+    else if (ratio >= 1.05) wkgColor = '#ff9900'; // Zone 5 (Orange, VO2 Max): 105-118%
+    else if (ratio >= 0.90) wkgColor = '#ffcc00'; // Zone 4 (Yellow, Threshold): 90-104%
+    else if (ratio >= 0.76) wkgColor = '#00ff00'; // Zone 3 (Green, Tempo): 76-89%
+    else if (ratio >= 0.60) wkgColor = '#4444ff'; // Zone 2 (Blue, Endurance): 60-75%
+    else wkgColor = '#888888';                    // Zone 1 (Grey, Recovery): <60%
 } else {
-    // fallback if no FTP or power
-    if (r.wkg >= 10.0) wkgColor = '#ff4444';
-    else if (r.wkg >= 3.5) wkgColor = '#ffcc00';
+    // fallback if no FTP or power available
+    if (r.wkg >= 6.0) wkgColor = '#ff4444';       // Likely maximal effort
+    else if (r.wkg >= 4.0) wkgColor = '#ff9900';  // Hard effort
+    else if (r.wkg >= 3.0) wkgColor = '#ffcc00';  // Moderate effort
+    else wkgColor = '#888888';                     // Easy effort
 }
 
 
@@ -815,13 +819,13 @@ const rowStyle = `
 
         return `
             <tr style="${rowStyle}" onclick="window.spectateRiderById(${r.riderId || 0})">
-                <td style="padding:4px; color:#fff;text-shadow: 1px 1px 4px #000">${name}</td>
-                <td style="padding:4px;color:#fff; font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${power}</td>
-                <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${speed}</td>
+                <td style="padding:4px; color:#fff;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${name}</td>
+                <td style="padding:4px;color:#fff; font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${power}</td>
+                <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${speed}</td>
 <td style="padding:4px;color:${wkgColor}; font-weight:bold; font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${wkg}</td>
-<td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${gapText}</td>
-                <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${dist}m</td>
-                <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${r.lap}</td>
+<td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${gapText}</td>
+                <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${dist}m</td>
+                <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${r.lap}</td>
             </tr>
         `;
     }
@@ -1048,7 +1052,7 @@ let breakaway = groups[0];
 
         // Always show group header
         html += `
-            <tr style="background:rgba(255,255,255,0.15); cursor:pointer; font-family:'Overpass',sans-serif;"
+            <tr style="background:rgba(255,255,255,0.15); cursor:pointer; font-family:'Overpass',sans-serif;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;"
                 onclick="if(event.ctrlKey) { window.spectateGroupLeader(${groupIdx}); } else { event.stopPropagation(); window.toggleGroup('${groupId}'); }"
                 title="Click to expand/collapse, Ctrl+Click to spectate leader">
                 <td colspan="7" style="padding:6px; color:#fff; font-weight:bold;">
