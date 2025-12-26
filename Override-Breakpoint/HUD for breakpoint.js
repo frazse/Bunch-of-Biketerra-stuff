@@ -24,6 +24,97 @@
     window.__lastLapCounts = {}; // Track lap counts to detect lap completions
     window.__pendingResultsFetch = false; // Prevent multiple simultaneous fetches
     window.__biketerra_token = ""; // Store auth token for API requests
+    window.__lastLapCounts = window.__lastLapCounts || {};
+    window.__resultsRequested = false;
+    // --- FTP cache ---
+    window.__athleteFtpMap = {};
+    window.__ftpQueue = [];
+    window.__ftpBusy = false;
+(() => {
+    const cache = loadFtpCache();
+    if (cache?.riders) {
+        Object.entries(cache.riders).forEach(([id, v]) => {
+            window.__athleteFtpMap[id] = v.ftp;
+        });
+    }
+})();
+
+function loadFtpCache() {
+    try {
+        return JSON.parse(localStorage.biketerraFtpCache || "{}");
+    } catch {
+        return {};
+    }
+}
+function extractFtpFromProfileHTML(html) {
+    const match = html.match(/athlete:\s*{[\s\S]*?ftp:\s*(\d+)/);
+    return match ? Number(match[1]) : null;
+}
+async function fetchAndCacheAthleteFTP(athleteId) {
+    const cache = loadFtpCache();
+    cache.riders ||= {};
+
+    const res = await fetch(`/athletes/${athleteId}`, {
+        credentials: "include"
+    });
+
+    const html = await res.text();
+    const ftp = extractFtpFromProfileHTML(html);
+
+    if (!ftp) return null;
+
+    cache.riders[athleteId] = {
+        ftp,
+        updated: new Date().toISOString().slice(0, 10)
+    };
+
+    cache.lastRefresh = new Date().toISOString().slice(0, 10);
+    saveFtpCache(cache);
+
+    window.__athleteFtpMap[athleteId] = ftp;
+    return ftp;
+}
+
+function saveFtpCache(cache) {
+    localStorage.biketerraFtpCache = JSON.stringify(cache);
+}
+
+function shouldRefreshMonthly(cache) {
+    if (!cache.lastRefresh) return true;
+
+    const last = new Date(cache.lastRefresh);
+    const now = new Date();
+
+    return (
+        now.getFullYear() !== last.getFullYear() ||
+        now.getMonth() !== last.getMonth()
+    );
+}
+function queueRidersForFtp(riders) {
+    const cache = loadFtpCache();
+    cache.riders ||= {};
+
+    riders.forEach(r => {
+        const id = r.riderId;
+        if (!id) return;
+
+        const riderCache = cache.riders[id];
+        const stale = !riderCache || shouldRefreshMonthly({ lastRefresh: riderCache.updated });
+
+        // Load cached FTP immediately if available
+        if (cache.riders[id]?.ftp) {
+            window.__athleteFtpMap[id] = cache.riders[id].ftp;
+            return;
+        }
+
+        // Queue if missing or monthly refresh
+        if (!window.__athleteFtpMap[id] && !window.__ftpQueue.includes(id)) {
+            window.__ftpQueue.push(id);
+        }
+    });
+}
+
+
 
     // Fetch token from dashboard
     async function fetchTokenFromDashboard() {
@@ -128,6 +219,14 @@
 
         return response;
     };
+function getTotalLaps() {
+    const el = document.querySelector('.panel-laps');
+    if (!el) return 1; // Missing = 1 lap race
+
+    // Example text: "Lap 4/3"
+    const m = el.textContent.match(/\/\s*(\d+)/);
+    return m ? parseInt(m[1], 10) : 1;
+}
 
     // Function to fetch race results
     async function fetchRaceResults() {
@@ -205,6 +304,36 @@ https://api.biketerra.com/event/get_results`;
             window.__pendingResultsFetch = false;
         }
     }
+function checkForRaceFinish(riders) {
+    if (window.__resultsRequested) return;
+
+    const totalLaps = getTotalLaps();
+
+    riders.forEach(r => {
+        const id = r.riderId;
+        const currentLap = r.lap;
+
+        const lastLap = window.__lastLapCounts[id];
+
+        // Detect N -> N+1 transition
+        if (
+            lastLap !== undefined &&
+            lastLap === totalLaps &&
+            currentLap === totalLaps + 1
+        ) {
+            console.log(`🏁 Rider ${id} finished race (Lap ${totalLaps} → ${currentLap})`);
+
+            window.__resultsRequested = true;
+
+            // Backend needs time to finalize
+            setTimeout(() => {
+                fetchRaceResults();
+            }, 2000);
+        }
+
+        window.__lastLapCounts[id] = currentLap;
+    });
+}
 
     // Function to check for lap completions and trigger results fetch
     function checkForLapCompletions(riders) {
@@ -613,9 +742,31 @@ const highlightStyle = r.isMe
             else gapText = `${Math.round(gapMeters)}m`;
         }
 
-        let wkgColor = '#fff';
-        if (r.wkg >= 10.0) wkgColor = '#ff4444';
-        else if (r.wkg >= 3.5) wkgColor = '#ffcc00';
+let wkgColor = '#fff';
+let ftp;
+
+// Determine correct FTP
+if (r.isMe && window.gameManager?.ego?.userData?.ftp) {
+    ftp = window.gameManager.ego.userData.ftp;
+} else {
+    ftp = window.__athleteFtpMap[r.riderId];
+}
+
+// Compute W/kg color
+if (ftp && r.power) {
+    const ratio = r.power / ftp;
+
+    if (ratio >= 1.30) wkgColor = '#ff4444';      // >130% FTP
+    else if (ratio >= 1.10) wkgColor = '#ff9900'; // VO2
+    else if (ratio >= 0.95) wkgColor = '#ffcc00'; // Threshold
+    else wkgColor = '#00ff88';                    // Easy
+} else {
+    // fallback if no FTP or power
+    if (r.wkg >= 10.0) wkgColor = '#ff4444';
+    else if (r.wkg >= 3.5) wkgColor = '#ffcc00';
+}
+
+
 
         let helmetColor = "#444444";
         const gmHumans = gm?.humans || {};
@@ -667,13 +818,31 @@ const rowStyle = `
                 <td style="padding:4px; color:#fff;text-shadow: 1px 1px 4px #000">${name}</td>
                 <td style="padding:4px;color:#fff; font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${power}</td>
                 <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${speed}</td>
-                <td style="padding:4px;color:${wkgColor}; font-weight:bold; font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000;">${wkg}</td>
-                <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${gapText}</td>
+<td style="padding:4px;color:${wkgColor}; font-weight:bold; font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${wkg}</td>
+<td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${gapText}</td>
                 <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${dist}m</td>
                 <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: 1px 1px 4px #000">${r.lap}</td>
             </tr>
         `;
     }
+async function processFtpQueue() {
+    if (window.__ftpBusy) return;
+    if (window.__ftpQueue.length === 0) return;
+
+    window.__ftpBusy = true;
+    const athleteId = window.__ftpQueue.shift();
+
+    try {
+        await fetchAndCacheAthleteFTP(athleteId);
+    } catch (e) {
+        console.warn("FTP fetch failed for", athleteId, e);
+    }
+
+    setTimeout(() => {
+        window.__ftpBusy = false;
+        processFtpQueue();
+    }, 600); // safe throttle
+}
 
     setInterval(() => {
         if (!window.hackedRiders) {
@@ -683,6 +852,8 @@ const rowStyle = `
         }
 
         let riders = [...window.hackedRiders];
+        queueRidersForFtp(riders);
+
         let leaderLap = 0;
 
         const gm = window.gameManager;
@@ -724,7 +895,7 @@ const rowStyle = `
         });
 
         // Check for lap completions to trigger results fetch
-        checkForLapCompletions(riders);
+checkForRaceFinish(riders);
 
         // Sort finished riders by position
         finishedRiders.sort((a, b) => {
@@ -996,5 +1167,6 @@ let breakaway = groups[0];
         }
 
     }, 500);
+setInterval(processFtpQueue, 1000);
 
 })();
