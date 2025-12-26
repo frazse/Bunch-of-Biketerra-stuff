@@ -25,26 +25,7 @@
     window.__pendingResultsFetch = false; // Prevent multiple simultaneous fetches
     window.__biketerra_token = ""; // Store auth token for API requests
 
-    // Token extraction from page scripts (same method as Challenge List script)
-    function extractTokenFromScripts() {
-        console.log("🔍 Attempting to extract token from page scripts...");
-        const scripts = document.querySelectorAll('script');
-        for (const script of scripts) {
-            const text = script.textContent;
-            // Look for token with flexible whitespace and any alphanumeric characters
-            // Matches: token: "..." or token:"..." where ... is 15+ alphanumeric chars
-            const tokenMatch = text.match(/token\s*:\s*"([a-zA-Z0-9]{15,})"/);
-            if (tokenMatch) {
-                window.__biketerra_token = tokenMatch[1];
-                console.log("🔑 Auth token extracted from page scripts:", tokenMatch[1].substring(0, 8) + "...");
-                return tokenMatch[1];
-            }
-        }
-        console.warn("⚠️ Token not found in page scripts");
-        return null;
-    }
-
-    // Fetch token from dashboard as fallback
+    // Fetch token from dashboard
     async function fetchTokenFromDashboard() {
         console.log("🔍 Fetching token from dashboard...");
         try {
@@ -66,27 +47,13 @@
         }
     }
 
-    // Try to extract token on load with multiple fallbacks
+    // Initialize token on load
     async function initializeToken() {
-        // Try page scripts first
-        let token = extractTokenFromScripts();
-
-        if (!token) {
-            // Wait a bit and try again
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            token = extractTokenFromScripts();
-        }
-
-        if (!token) {
-            // Fetch from dashboard as last resort
-            console.log("🔍 Token not found on page, fetching from dashboard...");
-            token = await fetchTokenFromDashboard();
-        }
-
+        const token = await fetchTokenFromDashboard();
         if (token) {
             console.log("✅ Token successfully initialized");
         } else {
-            console.error("❌ Failed to obtain auth token from any source");
+            console.error("❌ Failed to obtain auth token from dashboard");
         }
     }
 
@@ -120,18 +87,6 @@
                     const arr = node.data || node; // sometimes node itself is array
 
                     arr.forEach((item, idx) => {
-                        // Also look for token in __data.json
-                        if (!window.__biketerra_token && typeof item === 'object' && item?.user?.token) {
-                            window.__biketerra_token = item.user.token;
-                            console.log("🔑 Auth token extracted from __data.json:", item.user.token.substring(0, 8) + "...");
-                        }
-
-                        // Look for token string in array (it might be stored as separate items)
-                        if (!window.__biketerra_token && idx > 0 && arr[idx - 1] === "token" && typeof item === 'string' && item.length > 15) {
-                            window.__biketerra_token = item;
-                            console.log("🔑 Auth token found as array item in __data.json:", item.substring(0, 8) + "...");
-                        }
-
                         if (item === "ttt") {
                             // Grab next few items to find the teams JSON
                             const potentialTeams = arr.slice(idx + 1, idx + 5);
@@ -187,18 +142,16 @@
 
             const raceId = urlMatch[1];
 
-            // Get the token - try to extract if we don't have it yet
+            // Get the token
             let token = window.__biketerra_token;
-            if (!token) {
-                token = extractTokenFromScripts();
-            }
 
             if (!token) {
                 console.warn("⚠️ Cannot fetch results: No auth token available");
                 return null;
             }
 
-            const resultsUrl = `https://biketerra.com/api/results`;
+            const resultsUrl = `
+https://api.biketerra.com/event/get_results`;
 
             const response = await fetch(resultsUrl, {
                 method: 'POST',
@@ -273,12 +226,10 @@
             window.__lastLapCounts[riderId] = currentLap;
         });
 
-        // Fetch results 15 seconds after a lap completion is detected
+        // Fetch results immediately after a lap completion is detected (no delay for testing)
         if (shouldFetch && !window.__pendingResultsFetch) {
-            console.log("⏱️ Scheduling results fetch in 15 seconds...");
-            setTimeout(() => {
-                fetchRaceResults();
-            }, 15000);
+            console.log("⏱️ Fetching results immediately (testing mode)...");
+            fetchRaceResults();
         }
     }
 
@@ -422,7 +373,7 @@ window.stopGroupSpectate = function() {
 
         waitFor(".rider-list-footer").then(el => {
         if(el) {
-            el.style.paddingTop = '.3rem';
+            el.style.paddingTop = '.09rem';
             el.style.paddingRight = '.4rem';
         }
     }).catch(() => {});
