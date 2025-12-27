@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Biketerra - Riderlist replacement HUD
 // @namespace    http://tampermonkey.net/
-// @version      12.2
+// @version      12.3
 // @description  Using native game lapCount with Finished riders group
 // @author       You
 // @match        https://biketerra.com/ride*
@@ -20,12 +20,9 @@
 
     // Store finished riders data
     window.__finishedRiders = {};
-    window.__raceResults = null;
     window.__lastLapCounts = {}; // Track lap counts to detect lap completions
-    window.__pendingResultsFetch = false; // Prevent multiple simultaneous fetches
-    window.__biketerra_token = ""; // Store auth token for API requests
     window.__lastLapCounts = window.__lastLapCounts || {};
-    window.__resultsRequested = false;
+    
     // --- FTP cache ---
     window.__athleteFtpMap = {};
     window.__ftpQueue = [];
@@ -114,43 +111,6 @@ function queueRidersForFtp(riders) {
     });
 }
 
-
-
-    // Fetch token from dashboard
-    async function fetchTokenFromDashboard() {
-        console.log("🔍 Fetching token from dashboard...");
-        try {
-            const response = await fetch('https://biketerra.com/dashboard');
-            const text = await response.text();
-
-            // Look for token with flexible whitespace and any alphanumeric characters
-            const tokenMatch = text.match(/token\s*:\s*"([a-zA-Z0-9]{15,})"/);
-            if (tokenMatch) {
-                window.__biketerra_token = tokenMatch[1];
-                console.log("🔑 Auth token extracted from dashboard:", tokenMatch[1].substring(0, 8) + "...");
-                return tokenMatch[1];
-            }
-            console.warn("⚠️ Token not found in dashboard");
-            return null;
-        } catch (e) {
-            console.error("❌ Error fetching dashboard:", e);
-            return null;
-        }
-    }
-
-    // Initialize token on load
-    async function initializeToken() {
-        const token = await fetchTokenFromDashboard();
-        if (token) {
-            console.log("✅ Token successfully initialized");
-        } else {
-            console.error("❌ Failed to obtain auth token from dashboard");
-        }
-    }
-
-    // Initialize token
-    initializeToken();
-
     const originalFetch = window.fetch;
     window.fetch = async function(input, init) {
         const response = await originalFetch(input, init);
@@ -219,6 +179,7 @@ function queueRidersForFtp(riders) {
 
         return response;
     };
+
 function getTotalLaps() {
     const el = document.querySelector('.panel-laps');
     if (!el) return 1; // Missing = 1 lap race
@@ -228,142 +189,34 @@ function getTotalLaps() {
     return m ? parseInt(m[1], 10) : 1;
 }
 
-    // Function to fetch race results
-    async function fetchRaceResults() {
-        if (window.__pendingResultsFetch) return; // Prevent duplicate fetches
-
-        window.__pendingResultsFetch = true;
-
-        try {
-            // Extract race ID from URL
-            const urlMatch = location.href.match(/(?:ride|spectate)\/([^/?]+)/);
-            if (!urlMatch) return null;
-
-            const raceId = urlMatch[1];
-
-            // Get the token
-            let token = window.__biketerra_token;
-
-            if (!token) {
-                console.warn("⚠️ Cannot fetch results: No auth token available");
-                return null;
-            }
-
-            const resultsUrl = `
-https://api.biketerra.com/event/get_results`;
-
-            const response = await fetch(resultsUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    token: token,
-                    id: parseInt(raceId)
-                })
-            });
-
-            if (!response.ok) {
-                console.error("Results API error:", response.status, response.statusText);
-                return null;
-            }
-
-            const data = await response.json();
-
-            if (!data.ok || !data.msg) {
-                console.error("Results API returned error:", data);
-                return null;
-            }
-
-            window.__raceResults = data.msg;
-
-            // Process results into finished riders map
-            if (data.msg.results && Array.isArray(data.msg.results)) {
-                const finishedCount = data.msg.results.filter(r => r.finish_time).length;
-                console.log(`🏁 Processing ${finishedCount} finished riders from results API`);
-
-                data.msg.results.forEach((result, index) => {
-                    if (result.id && result.finish_time) {
-                        window.__finishedRiders[result.id] = {
-                            position: index + 1,
-                            finishTime: result.finish_time,
-                            elapsedTime: result.elapsed_time,
-                            firstName: result.first_name,
-                            lastName: result.last_name
-                        };
-                    }
-                });
-                console.log("🏁 Race results loaded. Finished rider IDs:", Object.keys(window.__finishedRiders));
-            }
-
-            return data.msg;
-        } catch (e) {
-            console.error("Error fetching race results:", e);
-            return null;
-        } finally {
-            window.__pendingResultsFetch = false;
-        }
-    }
+// Simplified function to mark riders as finished based on lap completion
 function checkForRaceFinish(riders) {
-    if (window.__resultsRequested) return;
-
     const totalLaps = getTotalLaps();
 
     riders.forEach(r => {
         const id = r.riderId;
         const currentLap = r.lap;
-
         const lastLap = window.__lastLapCounts[id];
 
-        // Detect N -> N+1 transition
+        // Detect N -> N+1 transition (rider crossed finish line on final lap)
         if (
             lastLap !== undefined &&
             lastLap === totalLaps &&
             currentLap === totalLaps + 1
         ) {
-            console.log(`🏁 Rider ${id} finished race (Lap ${totalLaps} → ${currentLap})`);
+            console.log(`🏁 Rider ${id} (${r.name}) finished race (Lap ${totalLaps} → ${currentLap})`);
 
-            window.__resultsRequested = true;
-
-            // Backend needs time to finalize
-            setTimeout(() => {
-                fetchRaceResults();
-            }, 2000);
+            // Mark rider as finished
+            if (!window.__finishedRiders[id]) {
+                window.__finishedRiders[id] = {
+                    finishTime: Date.now() // Use current timestamp for sorting order
+                };
+            }
         }
 
         window.__lastLapCounts[id] = currentLap;
     });
 }
-
-    // Function to check for lap completions and trigger results fetch
-    function checkForLapCompletions(riders) {
-        let shouldFetch = false;
-
-        riders.forEach(r => {
-            const riderId = r.riderId;
-            const currentLap = r.lap;
-
-            // Check if this rider completed a lap since last check
-            if (window.__lastLapCounts[riderId] !== undefined) {
-                if (currentLap > window.__lastLapCounts[riderId]) {
-                    console.log(`🏁 Rider ${riderId} completed lap ${currentLap}`);
-                    shouldFetch = true;
-                }
-            }
-
-            // Update last known lap count
-            window.__lastLapCounts[riderId] = currentLap;
-        });
-
-        // Fetch results immediately after a lap completion is detected (no delay for testing)
-        if (shouldFetch && !window.__pendingResultsFetch) {
-            console.log("⏱️ Fetching results immediately (testing mode)...");
-            fetchRaceResults();
-        }
-    }
-
-    // Initial fetch on load
-    fetchRaceResults();
 
 // --- Global Function to Handle Spectate Click ---
 window.spectateRiderById = function(riderId) {
@@ -482,7 +335,7 @@ window.stopGroupSpectate = function() {
     window.__lastGroupLeader = null;
 };
 
-        function waitFor(selector, timeout=10000) {
+    function waitFor(selector, timeout=10000) {
         return new Promise((resolve, reject)=>{
             const t = setTimeout(()=>reject("Timeout "+selector), timeout);
             const check = ()=>{
@@ -500,18 +353,47 @@ window.stopGroupSpectate = function() {
     }
     hideOriginalRiderList();
 
-        waitFor(".rider-list-footer").then(el => {
+    waitFor(".rider-list-footer").then(el => {
         if(el) {
             el.style.paddingTop = '.09rem';
             el.style.paddingRight = '.4rem';
         }
     }).catch(() => {});
-        waitFor(".view-toggle").then(el => {
+    waitFor(".view-toggle").then(el => {
         if(el) el.style.display = 'none';
     }).catch(() => {});
 
+    // --- Add custom scrollbar styling ---
+    const style = document.createElement('style');
+    style.textContent = `
+        /* Scrollbar for rider list */
+        #rider-list-container::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        #rider-list-container::-webkit-scrollbar-track {
+            background: rgba(0,0,0,0.2);
+            border-radius: 4px;
+        }
+        #rider-list-container::-webkit-scrollbar-thumb {
+            background: rgba(255,255,255,0.3);
+            border-radius: 4px;
+        }
+        #rider-list-container::-webkit-scrollbar-thumb:hover {
+            background: rgba(255,255,255,0.5);
+        }
+
+        /* Firefox */
+        #rider-list-container {
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255,255,255,0.3) rgba(0,0,0,0.2);
+        }
+    `;
+    document.head.appendChild(style);
+
     // --- HUD Container ---
     const container = document.createElement('div');
+    container.id = 'rider-list-container';
     container.style.cssText = `
         position: fixed;
         top: 8px;
@@ -673,22 +555,6 @@ window.stopGroupSpectate = function() {
         return null;
     }
 
-    // Format time helper
-    function formatTime(milliseconds) {
-        if (!milliseconds) return "—";
-
-        const totalSeconds = Math.floor(milliseconds / 1000);
-        const hours = Math.floor(totalSeconds / 3600);
-        const minutes = Math.floor((totalSeconds % 3600) / 60);
-        const seconds = totalSeconds % 60;
-
-        if (hours > 0) {
-            return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-        } else {
-            return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-        }
-    }
-
     // --- Rider row renderer ---
     function renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit, isFinished = false) {
         let name;
@@ -698,17 +564,9 @@ window.stopGroupSpectate = function() {
             name = r.name || "Unknown";
         }
 
-        // Add position and time for finished riders
-        if (isFinished && window.__finishedRiders[r.riderId]) {
-            const finishData = window.__finishedRiders[r.riderId];
-            const positionStr = finishData.position.toString().padStart(2, ' ');
-            const timeStr = formatTime(finishData.elapsedTime);
-            name = `${positionStr}. ${timeStr} - ${name}`;
-        }
-
-const highlightStyle = r.isMe
-    ? "outline: 2px solid #FF6262; outline-offset: -2px; box-shadow: 0 0 4px #FF6262;"
-    : "";
+        const highlightStyle = r.isMe
+            ? "outline: 2px solid #FF6262; outline-offset: -2px; box-shadow: 0 0 4px #FF6262;"
+            : "";
 
         const dist = r.lapDistance.toFixed(2);
         const speed = (r.speed * 3.6).toFixed(1);
@@ -717,9 +575,7 @@ const highlightStyle = r.isMe
 
         let gapText;
 
-        if (isFinished) {
-            gapText = "—";
-        } else if (r.riderId === referenceRiderId) {
+        if (r.riderId === referenceRiderId) {
             gapText = "0m";
         } else if (r.lap !== referenceLap) {
             // Calculate actual distance gap using lap information
@@ -742,35 +598,35 @@ const highlightStyle = r.isMe
             else gapText = `${Math.round(gapMeters)}m`;
         }
 
-let wkgColor = '#fff';
-let ftp;
+        let wkgColor = '#fff';
+        let ftp;
 
-// Determine correct FTP
-if (r.isMe && window.gameManager?.ego?.userData?.ftp) {
-    ftp = window.gameManager.ego.userData.ftp;
-} else {
-    ftp = window.__athleteFtpMap[r.riderId];
-}
+        // Determine correct FTP
+        if (r.isMe && window.gameManager?.ego?.userData?.ftp) {
+            ftp = window.gameManager.ego.userData.ftp;
+        } else {
+            ftp = window.__athleteFtpMap[r.riderId];
+        }
 
-// Compute W/kg color based on Zwift power zones
-if (ftp && r.power) {
-    const ratio = r.power / ftp;
+        // Compute W/kg color based on Intervals.icu power zones
+        if (ftp && r.power) {
+            const ratio = r.power / ftp;
 
-    if (ratio >= 1.18) wkgColor = '#ff4444';      // Zone 6 (Red, Anaerobic): >118%
-    else if (ratio >= 1.05) wkgColor = '#ff9900'; // Zone 5 (Orange, VO2 Max): 105-118%
-    else if (ratio >= 0.90) wkgColor = '#ffcc00'; // Zone 4 (Yellow, Threshold): 90-104%
-    else if (ratio >= 0.76) wkgColor = '#00ff00'; // Zone 3 (Green, Tempo): 76-89%
-    else if (ratio >= 0.60) wkgColor = '#4444ff'; // Zone 2 (Blue, Endurance): 60-75%
-    else wkgColor = '#888888';                    // Zone 1 (Grey, Recovery): <60%
-} else {
-    // fallback if no FTP or power available
-    if (r.wkg >= 6.0) wkgColor = '#ff4444';       // Likely maximal effort
-    else if (r.wkg >= 4.0) wkgColor = '#ff9900';  // Hard effort
-    else if (r.wkg >= 3.0) wkgColor = '#ffcc00';  // Moderate effort
-    else wkgColor = '#888888';                     // Easy effort
-}
-
-
+            if (ratio >= 1.51) wkgColor = 'rgb(80, 72, 97)';       // Z7 Neuromuscular: 151%+
+            else if (ratio >= 1.21) wkgColor = 'rgb(102, 51, 204)'; // Z6 Anaerobic: 121-150%
+            else if (ratio >= 1.06) wkgColor = 'rgb(221, 4, 71)';   // Z5 VO2 Max: 106-120%
+            else if (ratio >= 0.97) wkgColor = 'rgb(255, 127, 14)'; // Z4 Threshold: 97-105%
+            else if (ratio >= 0.84) wkgColor = 'rgb(255, 160, 14)'; // SS Sweet Spot: 84-97%
+            else if (ratio >= 0.76) wkgColor = 'rgb(255, 203, 14)'; // Z3 Tempo: 76-83%
+            else if (ratio >= 0.56) wkgColor = 'rgb(0, 158, 0)';    // Z2 Endurance: 56-75%
+            else wkgColor = 'rgb(0, 158, 128)';                     // Z1 Active Recovery: 0-55%
+        } else {
+            // fallback if no FTP or power available
+            if (r.wkg >= 6.0) wkgColor = 'rgb(102, 51, 204)';      // Likely maximal effort
+            else if (r.wkg >= 4.0) wkgColor = 'rgb(221, 4, 71)';   // Hard effort
+            else if (r.wkg >= 3.0) wkgColor = 'rgb(255, 127, 14)'; // Moderate effort
+            else wkgColor = 'rgb(0, 158, 128)';                    // Easy effort
+        }
 
         let helmetColor = "#444444";
         const gmHumans = gm?.humans || {};
@@ -809,44 +665,44 @@ if (ftp && r.power) {
             bgColor = `rgba(${rC},${gC},${bC},0.6)`;
         }
 
-const rowStyle = `
-    border-bottom:1px solid #333;
-    background:${bgColor};
-    cursor:${r.isMe ? "default" : "pointer"};
-    ${highlightStyle}
-`;
-
+        const rowStyle = `
+            border-bottom:1px solid #333;
+            background:${bgColor};
+            cursor:${r.isMe ? "default" : "pointer"};
+            ${highlightStyle}
+        `;
 
         return `
             <tr style="${rowStyle}" onclick="window.spectateRiderById(${r.riderId || 0})">
-                <td style="padding:4px; color:#fff;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${name}</td>
-                <td style="padding:4px;color:#fff; font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${power}</td>
-                <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${speed}</td>
-<td style="padding:4px;color:${wkgColor}; font-weight:bold; font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${wkg}</td>
-<td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${gapText}</td>
-                <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${dist}m</td>
-                <td style="padding:4px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${r.lap}</td>
+                <td style="padding:4px;font-size:13px; color:#fff;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${name}</td>
+                <td style="padding:4px;font-size:13px;color:#fff; font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${power}</td>
+                <td style="padding:4px;font-size:13px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${speed}</td>
+                <td style="padding:4px;font-size:15px;color:${wkgColor}; font-weight:bold; font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${wkg}</td>
+                <td style="padding:4px;font-size:13px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${gapText}</td>
+                <td style="padding:4px;font-size:13px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${dist}m</td>
+                <td style="padding:4px;font-size:13px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${r.lap}</td>
             </tr>
         `;
     }
-async function processFtpQueue() {
-    if (window.__ftpBusy) return;
-    if (window.__ftpQueue.length === 0) return;
 
-    window.__ftpBusy = true;
-    const athleteId = window.__ftpQueue.shift();
+    async function processFtpQueue() {
+        if (window.__ftpBusy) return;
+        if (window.__ftpQueue.length === 0) return;
 
-    try {
-        await fetchAndCacheAthleteFTP(athleteId);
-    } catch (e) {
-        console.warn("FTP fetch failed for", athleteId, e);
+        window.__ftpBusy = true;
+        const athleteId = window.__ftpQueue.shift();
+
+        try {
+            await fetchAndCacheAthleteFTP(athleteId);
+        } catch (e) {
+            console.warn("FTP fetch failed for", athleteId, e);
+        }
+
+        setTimeout(() => {
+            window.__ftpBusy = false;
+            processFtpQueue();
+        }, 600); // safe throttle
     }
-
-    setTimeout(() => {
-        window.__ftpBusy = false;
-        processFtpQueue();
-    }, 600); // safe throttle
-}
 
     setInterval(() => {
         if (!window.hackedRiders) {
@@ -898,14 +754,14 @@ async function processFtpQueue() {
             }
         });
 
-        // Check for lap completions to trigger results fetch
-checkForRaceFinish(riders);
+        // Check for race finishes
+        checkForRaceFinish(riders);
 
-        // Sort finished riders by position
+        // Sort finished riders by finish time (earliest first)
         finishedRiders.sort((a, b) => {
-            const posA = window.__finishedRiders[a.riderId]?.position || 9999;
-            const posB = window.__finishedRiders[b.riderId]?.position || 9999;
-            return posA - posB;
+            const timeA = window.__finishedRiders[a.riderId]?.finishTime || 0;
+            const timeB = window.__finishedRiders[b.riderId]?.finishTime || 0;
+            return timeA - timeB;
         });
 
         // Sort active riders by lap and distance
@@ -933,151 +789,138 @@ checkForRaceFinish(riders);
         const referenceLap = referenceRider?.lap || 1;
         const referenceDist = referenceRider?.lapDistance || 0;
 
-        // Debug logging (uncomment to troubleshoot gap issues)
-        // if (referenceRider) {
-        //     console.log(`Reference rider: ${referenceRider.name} | Lap: ${referenceLap} | Distance: ${referenceDist.toFixed(2)}m`);
-        //     const nearbyRiders = activeRiders.slice(0, 5);
-        //     nearbyRiders.forEach(r => {
-        //         const gap = r.lapDistance - referenceDist;
-        //         console.log(`  ${r.name}: Lap ${r.lap}, Dist ${r.lapDistance.toFixed(2)}m, Gap: ${gap.toFixed(2)}m, isMe: ${r.isMe}`);
-        //     });
-        // }
-
         let html = '';
 
-if (isGroupView) {
-    const groups = [];
-    let currentGroup = [];
+        if (isGroupView) {
+            const groups = [];
+            let currentGroup = [];
 
-    // --- 1. Build groups based on distance (only for active riders) ---
-    activeRiders.forEach((r, idx) => {
-        if (currentGroup.length === 0) {
-            currentGroup.push(r);
+            // --- 1. Build groups based on distance (only for active riders) ---
+            activeRiders.forEach((r, idx) => {
+                if (currentGroup.length === 0) {
+                    currentGroup.push(r);
+                } else {
+                    const lastRider = currentGroup[currentGroup.length - 1];
+                    const gap = lastRider.lapDistance - r.lapDistance;
+
+                    if (gap <= GROUP_DISTANCE && r.lap === lastRider.lap) {
+                        currentGroup.push(r);
+                    } else {
+                        groups.push([...currentGroup]);
+                        currentGroup = [r];
+                    }
+                }
+            });
+            if (currentGroup.length > 0) groups.push(currentGroup);
+
+            // --- 2. Compute lead distance and lap for each group ---
+            groups.forEach(g => {
+                g.leadLap = Math.max(...g.map(r => r.lap));
+                g.leadDist = Math.max(...g.map(r => r.lapDistance + (r.lap - 1) * globalLapLimit));
+            });
+
+            // --- 3. Sort groups by lap then distance, Identify Breakaway (front-most group) ---
+            groups.sort((a, b) => {
+                if (b.leadLap !== a.leadLap) return b.leadLap - a.leadLap;
+                return b.leadDist - a.leadDist;
+            });
+            let breakaway = groups[0];
+
+            // --- 4. Identify Peloton (largest group) ---
+            let peloton = groups.reduce((max, g) => g.length > max.length ? g : max, groups[0]);
+
+            // --- 5. Ensure only 1 Peloton ---
+            if (breakaway.length > peloton.length) {
+                let temp = peloton;
+                peloton = breakaway;
+                breakaway = temp;
+            }
+
+            // --- 6. Render Finished group first if there are finished riders ---
+            if (finishedRiders.length > 0) {
+                const groupId = 'group-finished';
+                const isExpanded = !expandedGroups.has(groupId + '-collapsed');
+                const arrow = isExpanded ? '▲' : '▼';
+
+                html += `
+                    <tr style="background:rgba(50,205,50,0.3); cursor:pointer; font-family:'Overpass',sans-serif;"
+                        onclick="event.stopPropagation(); window.toggleGroup('${groupId}');"
+                        title="Click to expand/collapse">
+                        <td colspan="7" style="padding:6px; color:#fff; font-weight:bold;">
+                            ${arrow} Finished - ${finishedRiders.length} rider${finishedRiders.length>1?'s':''}
+                        </td>
+                    </tr>
+                `;
+
+                finishedRiders.forEach(r => {
+                    const riderRow = renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit, true);
+                    if (!isExpanded) {
+                        html += riderRow.replace('<tr style="', '<tr style="display:none; ');
+                    } else {
+                        html += riderRow;
+                    }
+                });
+
+                html += `<tr style="height:4px;"><td colspan="7"></td></tr>`;
+            }
+
+            // --- 7. Render active groups ---
+            let chaseCounter = 1;
+            let stragglersCounter = 1;
+
+            groups.forEach((group, groupIdx) => {
+                const groupSize = group.length;
+                const avgSpeed = (group.reduce((sum, r) => sum + r.speed, 0) / groupSize * 3.6).toFixed(1);
+                const groupId = `group-${groupIdx}`;
+                const isExpanded = !expandedGroups.has(groupId + '-collapsed');
+
+                // Determine group label
+                let groupLabel = "";
+                if (group === breakaway) groupLabel = `Breakaway - ${groupSize} rider${groupSize>1?'s':''}`;
+                else if (group === peloton) groupLabel = `Peloton - ${groupSize} rider${groupSize>1?'s':''}`;
+                else if (group.leadDist < breakaway.leadDist && group.leadDist > peloton.leadDist) {
+                    groupLabel = `Chase Group ${chaseCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
+                } else {
+                    groupLabel = `Stragglers ${stragglersCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
+                }
+
+                // TTT team detection
+                if (window.__tttDataLoaded && group.length > 1) {
+                    const teamNames = new Set(
+                        group
+                            .map(r => window.__tttTeamMap[String(r.riderId)])
+                            .filter(Boolean)
+                    );
+                    if (teamNames.size === 1) groupLabel = [...teamNames][0];
+                }
+
+                const arrow = isExpanded ? '▲' : '▼';
+
+                // Always show group header
+                html += `
+                    <tr style="background:rgba(255,255,255,0.15); cursor:pointer; font-family:'Overpass',sans-serif;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;"
+                        onclick="if(event.ctrlKey) { window.spectateGroupLeader(${groupIdx}); } else { event.stopPropagation(); window.toggleGroup('${groupId}'); }"
+                        title="Click to expand/collapse, Ctrl+Click to spectate leader">
+                        <td colspan="7" style="padding:6px; color:#fff; font-weight:bold;">
+                            ${arrow} ${groupLabel} (${avgSpeed} kph)
+                        </td>
+                    </tr>
+                `;
+
+                // Render each rider in the group with proper display toggle
+                group.forEach(r => {
+                    const riderRow = renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit);
+                    // Add display style to the row if group is collapsed
+                    if (!isExpanded) {
+                        html += riderRow.replace('<tr style="', '<tr style="display:none; ');
+                    } else {
+                        html += riderRow;
+                    }
+                });
+
+                html += `<tr style="height:4px;"><td colspan="7"></td></tr>`;
+            });
         } else {
-            const lastRider = currentGroup[currentGroup.length - 1];
-            const gap = lastRider.lapDistance - r.lapDistance;
-
-            if (gap <= GROUP_DISTANCE && r.lap === lastRider.lap) {
-                currentGroup.push(r);
-            } else {
-                groups.push([...currentGroup]);
-                currentGroup = [r];
-            }
-        }
-    });
-    if (currentGroup.length > 0) groups.push(currentGroup);
-
-// --- 2. Compute lead distance and lap for each group ---
-groups.forEach(g => {
-    g.leadLap = Math.max(...g.map(r => r.lap));
-    g.leadDist = Math.max(...g.map(r => r.lapDistance + (r.lap - 1) * globalLapLimit));
-});
-
-// --- 3. Sort groups by lap then distance, Identify Breakaway (front-most group) ---
-groups.sort((a, b) => {
-    if (b.leadLap !== a.leadLap) return b.leadLap - a.leadLap;
-    return b.leadDist - a.leadDist;
-});
-let breakaway = groups[0];
-
-    // --- 4. Identify Peloton (largest group) ---
-    let peloton = groups.reduce((max, g) => g.length > max.length ? g : max, groups[0]);
-
-    // --- 5. Ensure only 1 Peloton ---
-    if (breakaway.length > peloton.length) {
-        let temp = peloton;
-        peloton = breakaway;
-        breakaway = temp;
-    }
-
-    // --- 6. Render Finished group first if there are finished riders ---
-    if (finishedRiders.length > 0) {
-        const groupId = 'group-finished';
-        const isExpanded = !expandedGroups.has(groupId + '-collapsed');
-        const arrow = isExpanded ? '▲' : '▼';
-
-        html += `
-            <tr style="background:rgba(50,205,50,0.3); cursor:pointer; font-family:'Overpass',sans-serif;"
-                onclick="event.stopPropagation(); window.toggleGroup('${groupId}');"
-                title="Click to expand/collapse">
-                <td colspan="7" style="padding:6px; color:#fff; font-weight:bold;">
-                    ${arrow} Finished - ${finishedRiders.length} rider${finishedRiders.length>1?'s':''}
-                </td>
-            </tr>
-        `;
-
-        finishedRiders.forEach(r => {
-            const riderRow = renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit, true);
-            if (!isExpanded) {
-                html += riderRow.replace('<tr style="', '<tr style="display:none; ');
-            } else {
-                html += riderRow;
-            }
-        });
-
-        html += `<tr style="height:4px;"><td colspan="7"></td></tr>`;
-    }
-
-    // --- 7. Render active groups ---
-    let chaseCounter = 1;
-    let stragglersCounter = 1;
-
-    groups.forEach((group, groupIdx) => {
-        const groupSize = group.length;
-        const avgSpeed = (group.reduce((sum, r) => sum + r.speed, 0) / groupSize * 3.6).toFixed(1);
-        const groupId = `group-${groupIdx}`;
-        const isExpanded = !expandedGroups.has(groupId + '-collapsed');
-
-        // Determine group label
-        let groupLabel = "";
-        if (group === breakaway) groupLabel = `Breakaway - ${groupSize} rider${groupSize>1?'s':''}`;
-        else if (group === peloton) groupLabel = `Peloton - ${groupSize} rider${groupSize>1?'s':''}`;
-        else if (group.leadDist < breakaway.leadDist && group.leadDist > peloton.leadDist) {
-            groupLabel = `Chase Group ${chaseCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
-        } else {
-            groupLabel = `Stragglers ${stragglersCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
-        }
-
-        // TTT team detection
-        if (window.__tttDataLoaded && group.length > 1) {
-            const teamNames = new Set(
-                group
-                    .map(r => window.__tttTeamMap[String(r.riderId)])
-                    .filter(Boolean)
-            );
-            if (teamNames.size === 1) groupLabel = [...teamNames][0];
-        }
-
-        const arrow = isExpanded ? '▲' : '▼';
-
-        // Always show group header
-        html += `
-            <tr style="background:rgba(255,255,255,0.15); cursor:pointer; font-family:'Overpass',sans-serif;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;"
-                onclick="if(event.ctrlKey) { window.spectateGroupLeader(${groupIdx}); } else { event.stopPropagation(); window.toggleGroup('${groupId}'); }"
-                title="Click to expand/collapse, Ctrl+Click to spectate leader">
-                <td colspan="7" style="padding:6px; color:#fff; font-weight:bold;">
-                    ${arrow} ${groupLabel} (${avgSpeed} kph)
-                </td>
-            </tr>
-        `;
-
-        // Render each rider in the group with proper display toggle
-        group.forEach(r => {
-            const riderRow = renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit);
-            // Add display style to the row if group is collapsed
-            if (!isExpanded) {
-                html += riderRow.replace('<tr style="', '<tr style="display:none; ');
-            } else {
-                html += riderRow;
-            }
-        });
-
-        html += `<tr style="height:4px;"><td colspan="7"></td></tr>`;
-    });
-}
-
-
-       else {
             // Individual view - show finished riders first
             if (finishedRiders.length > 0) {
                 finishedRiders.forEach(r => {
@@ -1171,6 +1014,6 @@ let breakaway = groups[0];
         }
 
     }, 500);
-setInterval(processFtpQueue, 1000);
+    setInterval(processFtpQueue, 1000);
 
 })();
