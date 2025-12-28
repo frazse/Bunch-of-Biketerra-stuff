@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Biketerra - Riderlist replacement HUD
 // @namespace    http://tampermonkey.net/
-// @version      12.3
+// @version      12.4
 // @description  Using native game lapCount with Finished riders group
 // @author       You
 // @match        https://biketerra.com/ride*
@@ -22,7 +22,7 @@
     window.__finishedRiders = {};
     window.__lastLapCounts = {}; // Track lap counts to detect lap completions
     window.__lastLapCounts = window.__lastLapCounts || {};
-    
+
     // --- FTP cache ---
     window.__athleteFtpMap = {};
     window.__ftpQueue = [];
@@ -206,10 +206,11 @@ function checkForRaceFinish(riders) {
         ) {
             console.log(`🏁 Rider ${id} (${r.name}) finished race (Lap ${totalLaps} → ${currentLap})`);
 
-            // Mark rider as finished
+            // Mark rider as finished and store their data
             if (!window.__finishedRiders[id]) {
                 window.__finishedRiders[id] = {
-                    finishTime: Date.now() // Use current timestamp for sorting order
+                    finishTime: Date.now(), // Use current timestamp for sorting order
+                    riderData: { ...r } // Store a copy of the rider data
                 };
             }
         }
@@ -705,13 +706,31 @@ window.stopGroupSpectate = function() {
     }
 
     setInterval(() => {
-        if (!window.hackedRiders) {
+        if (!window.hackedRiders && Object.keys(window.__finishedRiders).length === 0) {
             statusLight.innerText = "●";
             statusLight.style.color = "orange";
             return;
         }
 
-        let riders = [...window.hackedRiders];
+        let riders = window.hackedRiders ? [...window.hackedRiders] : [];
+
+        // Add back any finished riders that are no longer in hackedRiders
+        Object.keys(window.__finishedRiders).forEach(finishedId => {
+            if (!riders.find(r => r.riderId == finishedId)) {
+                const storedData = window.__finishedRiders[finishedId].riderData;
+                if (storedData) {
+                    riders.push(storedData);
+                }
+            }
+        });
+
+        // If we have no riders at all, show waiting message
+        if (riders.length === 0) {
+            statusLight.innerText = "●";
+            statusLight.style.color = "orange";
+            return;
+        }
+
         queueRidersForFtp(riders);
 
         let leaderLap = 0;
@@ -724,6 +743,9 @@ window.stopGroupSpectate = function() {
         const globalRoad = ego?.currentPath?.road || focalRiderObj?.currentPath?.road;
         const globalLapLimit = globalRoad?.pathA?.distance || globalRoad?.pathB?.distance || 10000; // Default 10k
 
+        // Get total laps to detect already-finished riders
+        const totalLaps = getTotalLaps();
+
         // Separate finished and active riders
         const finishedRiders = [];
         const activeRiders = [];
@@ -732,8 +754,19 @@ window.stopGroupSpectate = function() {
             const rawDist = r.dist;
             const id = r.riderId;
 
-            // Check if rider has finished
-            const isFinished = window.__finishedRiders[id] !== undefined;
+            // Check if rider has finished (either already marked OR lap is beyond total laps)
+            let isFinished = window.__finishedRiders[id] !== undefined;
+
+            // Also check if rider has already completed all laps (for riders who finished before spectating started)
+            if (!isFinished && r.lap > totalLaps) {
+                isFinished = true;
+                // Mark them as finished now
+                window.__finishedRiders[id] = {
+                    finishTime: Date.now() - (r.lap - totalLaps) * 60000, // Estimate earlier finish time
+                    riderData: { ...r }
+                };
+                console.log(`🏁 Rider ${id} (${r.name}) was already finished when spectating started`);
+            }
 
             // Apply interpolation to smooth out position updates
             const dist = interpolateRider(id, rawDist, r.speed, r.isMe);
@@ -748,6 +781,8 @@ window.stopGroupSpectate = function() {
 
             // Split into finished vs active
             if (isFinished) {
+                // Update the stored rider data with current live data
+                window.__finishedRiders[id].riderData = { ...r };
                 finishedRiders.push(r);
             } else {
                 activeRiders.push(r);
@@ -781,11 +816,14 @@ window.stopGroupSpectate = function() {
             referenceRiderId = focalRiderObj.athleteId || focalRiderObj.id;
         }
 
-        // CRITICAL: Use the rider data from activeRiders array (which comes from window.hackedRiders)
-        // for ALL gap calculations, including for "isMe" rider. This ensures consistent data source.
-        // If gaps seem wrong, the issue is in the breakpoint code that populates window.hackedRiders,
-        // not in this display code.
-        const referenceRider = activeRiders.find(r => r.riderId === referenceRiderId) || activeRiders[0];
+        // Find reference rider in active riders first, then finished riders, then default to first available rider
+        let referenceRider = activeRiders.find(r => r.riderId === referenceRiderId);
+        if (!referenceRider) {
+            referenceRider = finishedRiders.find(r => r.riderId === referenceRiderId);
+        }
+        if (!referenceRider) {
+            referenceRider = activeRiders[0] || finishedRiders[0];
+        }
         const referenceLap = referenceRider?.lap || 1;
         const referenceDist = referenceRider?.lapDistance || 0;
 
@@ -824,16 +862,23 @@ window.stopGroupSpectate = function() {
                 if (b.leadLap !== a.leadLap) return b.leadLap - a.leadLap;
                 return b.leadDist - a.leadDist;
             });
-            let breakaway = groups[0];
 
-            // --- 4. Identify Peloton (largest group) ---
-            let peloton = groups.reduce((max, g) => g.length > max.length ? g : max, groups[0]);
+            let breakaway = null;
+            let peloton = null;
 
-            // --- 5. Ensure only 1 Peloton ---
-            if (breakaway.length > peloton.length) {
-                let temp = peloton;
-                peloton = breakaway;
-                breakaway = temp;
+            // Only process groups if we have active riders
+            if (groups.length > 0) {
+                breakaway = groups[0];
+
+                // --- 4. Identify Peloton (largest group) ---
+                peloton = groups.reduce((max, g) => g.length > max.length ? g : max, groups[0]);
+
+                // --- 5. Ensure only 1 Peloton ---
+                if (breakaway.length > peloton.length) {
+                    let temp = peloton;
+                    peloton = breakaway;
+                    breakaway = temp;
+                }
             }
 
             // --- 6. Render Finished group first if there are finished riders ---
@@ -876,9 +921,9 @@ window.stopGroupSpectate = function() {
 
                 // Determine group label
                 let groupLabel = "";
-                if (group === breakaway) groupLabel = `Breakaway - ${groupSize} rider${groupSize>1?'s':''}`;
-                else if (group === peloton) groupLabel = `Peloton - ${groupSize} rider${groupSize>1?'s':''}`;
-                else if (group.leadDist < breakaway.leadDist && group.leadDist > peloton.leadDist) {
+                if (breakaway && group === breakaway) groupLabel = `Breakaway - ${groupSize} rider${groupSize>1?'s':''}`;
+                else if (peloton && group === peloton) groupLabel = `Peloton - ${groupSize} rider${groupSize>1?'s':''}`;
+                else if (breakaway && peloton && group.leadDist < breakaway.leadDist && group.leadDist > peloton.leadDist) {
                     groupLabel = `Chase Group ${chaseCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
                 } else {
                     groupLabel = `Stragglers ${stragglersCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
