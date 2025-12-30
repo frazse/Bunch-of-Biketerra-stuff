@@ -52,6 +52,15 @@
         if(el) el.style.paddingBottom = '20px';
     }).catch(() => {});
 
+    // Apply custom CSS modifications
+    waitFor(".hud-bottom").then(el => {
+        if(el) el.style.width = '68vw';
+    }).catch(() => {});
+
+    waitFor(".panel-elevation-profile").then(el => {
+        if(el) el.style.height = '10rem';
+    }).catch(() => {});
+
     function createOverlay() {
         const elevGraph = document.querySelector('.elev-graph');
         if (!elevGraph) return null;
@@ -145,7 +154,7 @@ function updateElevCursorColors() {
     const viewWidth = parts[2];
     const viewHeight = parts[3];
     const midY = minY + (viewHeight / 2);
-    const strokeWidth = viewWidth * 0.003;
+    const strokeWidth = viewWidth * 0.002;
 
     // Get position from CSS left (e.g., "calc(49.9993% - 1px)")
     const leftStyle = elevCursor.style.left;
@@ -366,7 +375,7 @@ function updateElevCursorColors() {
         const minY = parts[1];
         const viewWidth = parts[2];
         const viewHeight = parts[3];
-        const strokeWidth = viewWidth * 0.003;
+        const strokeWidth = viewWidth * 0.002;
         const midY = minY + (viewHeight / 2);
 
         const activeRiders = new Set(ridersRaw.map(r => r.name));
