@@ -461,10 +461,19 @@ window.stopGroupSpectate = function() {
                     <span id="z7-time" style="text-align:center;">Z7<br>0s</span>
                 </div>
             </div>
-            <table style="width:100%; border-collapse:collapse;">
+            <table style="width:100%; border-collapse:collapse; table-layout:fixed;">
+                <colgroup>
+                    <col style="width:30%;">
+                    <col style="width:10%;">
+                    <col style="width:10%;">
+                    <col style="width:10%;">
+                    <col style="width:10%;">
+                    <col style="width:15%;">
+                    <col style="width:15%;">
+                </colgroup>
                 <thead>
                     <tr style="text-align:left; color:#fff;">
-                        <th style="padding:2px; width:30%;">Name</th>
+                        <th style="padding:2px;">Name</th>
                         <th style="padding:2px;">Power</th>
                         <th style="padding:2px;">Speed</th>
                         <th style="padding:2px;">W/kg</th>
@@ -476,7 +485,16 @@ window.stopGroupSpectate = function() {
             </table>
         </div>
         <div style="flex: 1; overflow-y: auto; padding: 0 10px 10px 10px;">
-            <table style="width:100%; border-collapse:collapse;">
+            <table style="width:100%; border-collapse:collapse; table-layout:fixed;">
+                <colgroup>
+                    <col style="width:30%;">
+                    <col style="width:10%;">
+                    <col style="width:10%;">
+                    <col style="width:10%;">
+                    <col style="width:10%;">
+                    <col style="width:15%;">
+                    <col style="width:15%;">
+                </colgroup>
                 <tbody id="rider-table-body">
                     <tr><td colspan="7" style="text-align:center; color:#888;">Waiting for breakpoint...</td></tr>
                 </tbody>
@@ -755,7 +773,7 @@ window.stopGroupSpectate = function() {
                 z1: 0, z2: 0, z3: 0, ss: 0, z4: 0, z5: 0, z6: 0, z7: 0
             };
         }
-
+        
         if (!window.__lastZoneUpdate[riderId]) {
             window.__lastZoneUpdate[riderId] = now;
             return; // Skip first update to establish baseline
@@ -790,7 +808,7 @@ window.stopGroupSpectate = function() {
             Object.keys({ z1: 0, z2: 0, z3: 0, ss: 0, z4: 0, z5: 0, z6: 0, z7: 0 }).forEach(z => {
                 const bar = document.getElementById(`${z}-bar`);
                 if (bar) bar.style.flex = 0;
-
+                
                 const label = document.getElementById(`${z}-time`);
                 if (label) {
                     const zoneLabel = z === 'ss' ? 'SS' : z.toUpperCase();
@@ -802,7 +820,7 @@ window.stopGroupSpectate = function() {
 
         const zones = window.__riderPowerZones[riderId];
         const totalTime = Object.values(zones).reduce((a, b) => a + b, 0);
-
+        
         // Update bars
         Object.keys(zones).forEach(z => {
             const bar = document.getElementById(`${z}-bar`);
@@ -939,14 +957,14 @@ window.stopGroupSpectate = function() {
         // --- Track power zones for ALL riders ---
         riders.forEach(r => {
             let ftp = null;
-
+            
             // Get FTP for this rider
             if (r.isMe && ego?.userData?.ftp) {
                 ftp = ego.userData.ftp;
             } else if (window.__athleteFtpMap[r.riderId]) {
                 ftp = window.__athleteFtpMap[r.riderId];
             }
-
+            
             // Update tracking for this rider
             if (ftp && r.power && r.riderId) {
                 updatePowerZoneTracking(r, ftp);
