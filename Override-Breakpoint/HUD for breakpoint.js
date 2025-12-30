@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra - Riderlist replacement HUD
 // @namespace    http://tampermonkey.net/
-// @version      12.4
-// @description  Using native game lapCount with Finished riders group
+// @version      12.9
+// @description  With sticky header, per-rider power zone tracking, finished riders group, and fixed single group labeling
 // @author       You
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate*
@@ -22,6 +22,10 @@
     window.__finishedRiders = {};
     window.__lastLapCounts = {}; // Track lap counts to detect lap completions
     window.__lastLapCounts = window.__lastLapCounts || {};
+
+    // --- Power Zone Time Tracking (per rider) ---
+    window.__riderPowerZones = {}; // riderId => { z1: 0, z2: 0, ... }
+    window.__lastZoneUpdate = {}; // riderId => timestamp
 
     // --- FTP cache ---
     window.__athleteFtpMap = {};
@@ -368,24 +372,24 @@ window.stopGroupSpectate = function() {
     const style = document.createElement('style');
     style.textContent = `
         /* Scrollbar for rider list */
-        #rider-list-container::-webkit-scrollbar {
+        #rider-list-container > div:last-child::-webkit-scrollbar {
             width: 8px;
             height: 8px;
         }
-        #rider-list-container::-webkit-scrollbar-track {
+        #rider-list-container > div:last-child::-webkit-scrollbar-track {
             background: rgba(0,0,0,0.2);
             border-radius: 4px;
         }
-        #rider-list-container::-webkit-scrollbar-thumb {
+        #rider-list-container > div:last-child::-webkit-scrollbar-thumb {
             background: rgba(255,255,255,0.3);
             border-radius: 4px;
         }
-        #rider-list-container::-webkit-scrollbar-thumb:hover {
+        #rider-list-container > div:last-child::-webkit-scrollbar-thumb:hover {
             background: rgba(255,255,255,0.5);
         }
 
         /* Firefox */
-        #rider-list-container {
+        #rider-list-container > div:last-child {
             scrollbar-width: thin;
             scrollbar-color: rgba(255,255,255,0.3) rgba(0,0,0,0.2);
         }
@@ -405,45 +409,79 @@ window.stopGroupSpectate = function() {
         color: #00ffcc;
         font-family: "Overpass", sans-serif;
         font-size: 12px;
-        padding: 4px 10px 10px 10px;
         z-index: 1;
         border-radius: 8px;
         max-height: 60vh;
-        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
     `;
     container.innerHTML = `
-        <div style="display:flex; align-items:center; margin-bottom:2px; height:16px;">
-            <span id="status-light" style="color:red; font-size:10px; line-height:1;">●</span>
-            <button id="view-toggle" style="
-                background:rgba(255,255,255,0);
-                color:#fff;
-                border:none;
-                cursor:pointer;
-                font-family:'Overpass',sans-serif;
-                font-size:14px;
-                outline:none;
-                padding:0;
-                margin:0;
-                line-height:1;
-                height:16px;
-            ">🗊</button>
+        <div style="padding: 4px 10px 0px 10px;">
+            <div style="display:flex; align-items:center; margin-bottom:2px; height:16px;">
+                <span id="status-light" style="color:red; font-size:10px; line-height:1;">●</span>
+                <button id="view-toggle" style="
+                    background:rgba(255,255,255,0);
+                    color:#fff;
+                    border:none;
+                    cursor:pointer;
+                    font-family:'Overpass',sans-serif;
+                    font-size:14px;
+                    outline:none;
+                    padding:0;
+                    margin:0;
+                    line-height:1;
+                    height:16px;
+                ">🗊</button>
+            </div>
+            <div id="power-zone-widget" style="
+                background:rgba(0,0,0,0.7);
+                padding:6px;
+                margin-bottom:6px;
+                border-radius:4px;
+            ">
+                <div style="font-size:11px; color:#fff; margin-bottom:4px; font-weight:bold;">Power Zones</div>
+                <div id="zone-bars" style="display:flex; gap:0; height:14px; margin-bottom:4px; background:rgba(255,255,255,0.1); border-radius:2px; overflow:hidden;">
+                    <div id="z1-bar" style="background:rgb(0,158,128); flex:0; transition:flex 0.3s;"></div>
+                    <div id="z2-bar" style="background:rgb(0,158,0); flex:0; transition:flex 0.3s;"></div>
+                    <div id="z3-bar" style="background:rgb(255,203,14); flex:0; transition:flex 0.3s;"></div>
+                    <div id="ss-bar" style="background:rgb(255,160,14); flex:0; transition:flex 0.3s;"></div>
+                    <div id="z4-bar" style="background:rgb(255,127,14); flex:0; transition:flex 0.3s;"></div>
+                    <div id="z5-bar" style="background:rgb(221,4,71); flex:0; transition:flex 0.3s;"></div>
+                    <div id="z6-bar" style="background:rgb(102,51,204); flex:0; transition:flex 0.3s;"></div>
+                    <div id="z7-bar" style="background:rgb(80,72,97); flex:0; transition:flex 0.3s;"></div>
+                </div>
+                <div style="display:grid; grid-template-columns:repeat(8, 1fr); gap:2px; font-size:9px; color:#aaa; font-family:Overpass Mono, monospace;">
+                    <span id="z1-time" style="text-align:center;">Z1<br>0s</span>
+                    <span id="z2-time" style="text-align:center;">Z2<br>0s</span>
+                    <span id="z3-time" style="text-align:center;">Z3<br>0s</span>
+                    <span id="ss-time" style="text-align:center;">SS<br>0s</span>
+                    <span id="z4-time" style="text-align:center;">Z4<br>0s</span>
+                    <span id="z5-time" style="text-align:center;">Z5<br>0s</span>
+                    <span id="z6-time" style="text-align:center;">Z6<br>0s</span>
+                    <span id="z7-time" style="text-align:center;">Z7<br>0s</span>
+                </div>
+            </div>
+            <table style="width:100%; border-collapse:collapse;">
+                <thead>
+                    <tr style="text-align:left; color:#fff;">
+                        <th style="padding:2px; width:30%;">Name</th>
+                        <th style="padding:2px;">Power</th>
+                        <th style="padding:2px;">Speed</th>
+                        <th style="padding:2px;">W/kg</th>
+                        <th style="padding:2px;">Gap</th>
+                        <th style="padding:2px;">Dist</th>
+                        <th style="padding:2px;">Lap</th>
+                    </tr>
+                </thead>
+            </table>
         </div>
-        <table style="width:100%; border-collapse:collapse;">
-            <thead>
-                <tr style="text-align:left; color:#fff;">
-                    <th style="padding:2px; width:30%;">Name</th>
-                    <th style="padding:2px;">Power</th>
-                    <th style="padding:2px;">Speed</th>
-                    <th style="padding:2px;">W/kg</th>
-                    <th style="padding:2px;">Gap</th>
-                    <th style="padding:2px;">Dist</th>
-                    <th style="padding:2px;">Lap</th>
-                </tr>
-            </thead>
-            <tbody id="rider-table-body">
-                <tr><td colspan="7" style="text-align:center; color:#888;">Waiting for breakpoint...</td></tr>
-            </tbody>
-        </table>
+        <div style="flex: 1; overflow-y: auto; padding: 0 10px 10px 10px;">
+            <table style="width:100%; border-collapse:collapse;">
+                <tbody id="rider-table-body">
+                    <tr><td colspan="7" style="text-align:center; color:#888;">Waiting for breakpoint...</td></tr>
+                </tbody>
+            </table>
+        </div>
     `;
     document.body.appendChild(container);
 
@@ -705,6 +743,96 @@ window.stopGroupSpectate = function() {
         }, 600); // safe throttle
     }
 
+    function updatePowerZoneTracking(rider, ftp) {
+        if (!rider || !ftp || !rider.riderId) return;
+
+        const riderId = rider.riderId;
+        const now = Date.now();
+
+        // Initialize tracking for this rider if not exists
+        if (!window.__riderPowerZones[riderId]) {
+            window.__riderPowerZones[riderId] = {
+                z1: 0, z2: 0, z3: 0, ss: 0, z4: 0, z5: 0, z6: 0, z7: 0
+            };
+        }
+
+        if (!window.__lastZoneUpdate[riderId]) {
+            window.__lastZoneUpdate[riderId] = now;
+            return; // Skip first update to establish baseline
+        }
+
+        const timeDelta = (now - window.__lastZoneUpdate[riderId]) / 1000; // seconds
+        window.__lastZoneUpdate[riderId] = now;
+
+        const power = rider.power;
+        const ratio = power / ftp;
+
+        // Determine which zone the rider is in
+        let zone = null;
+        if (ratio >= 1.51) zone = 'z7';
+        else if (ratio >= 1.21) zone = 'z6';
+        else if (ratio >= 1.06) zone = 'z5';
+        else if (ratio >= 0.97) zone = 'z4';
+        else if (ratio >= 0.84) zone = 'ss';
+        else if (ratio >= 0.76) zone = 'z3';
+        else if (ratio >= 0.56) zone = 'z2';
+        else zone = 'z1';
+
+        // Add time to the current zone for this rider
+        if (zone) {
+            window.__riderPowerZones[riderId][zone] += timeDelta;
+        }
+    }
+
+    function displayPowerZonesForRider(riderId) {
+        if (!riderId || !window.__riderPowerZones[riderId]) {
+            // No data yet - show zeros
+            Object.keys({ z1: 0, z2: 0, z3: 0, ss: 0, z4: 0, z5: 0, z6: 0, z7: 0 }).forEach(z => {
+                const bar = document.getElementById(`${z}-bar`);
+                if (bar) bar.style.flex = 0;
+
+                const label = document.getElementById(`${z}-time`);
+                if (label) {
+                    const zoneLabel = z === 'ss' ? 'SS' : z.toUpperCase();
+                    label.innerHTML = `${zoneLabel}<br>0s`;
+                }
+            });
+            return;
+        }
+
+        const zones = window.__riderPowerZones[riderId];
+        const totalTime = Object.values(zones).reduce((a, b) => a + b, 0);
+
+        // Update bars
+        Object.keys(zones).forEach(z => {
+            const bar = document.getElementById(`${z}-bar`);
+            if (bar) {
+                if (totalTime > 0) {
+                    const percentage = (zones[z] / totalTime) * 100;
+                    bar.style.flex = percentage > 0 ? percentage : 0;
+                } else {
+                    bar.style.flex = 0;
+                }
+            }
+        });
+
+        // Update time labels
+        const formatTime = (seconds) => {
+            if (seconds < 60) return `${Math.floor(seconds)}s`;
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        };
+
+        Object.keys(zones).forEach(z => {
+            const label = document.getElementById(`${z}-time`);
+            if (label) {
+                const zoneLabel = z === 'ss' ? 'SS' : z.toUpperCase();
+                label.innerHTML = `${zoneLabel}<br>${formatTime(zones[z])}`;
+            }
+        });
+    }
+
     setInterval(() => {
         if (!window.hackedRiders && Object.keys(window.__finishedRiders).length === 0) {
             statusLight.innerText = "●";
@@ -808,6 +936,23 @@ window.stopGroupSpectate = function() {
         statusLight.innerText = "●";
         statusLight.style.color = "#00ff00";
 
+        // --- Track power zones for ALL riders ---
+        riders.forEach(r => {
+            let ftp = null;
+
+            // Get FTP for this rider
+            if (r.isMe && ego?.userData?.ftp) {
+                ftp = ego.userData.ftp;
+            } else if (window.__athleteFtpMap[r.riderId]) {
+                ftp = window.__athleteFtpMap[r.riderId];
+            }
+
+            // Update tracking for this rider
+            if (ftp && r.power && r.riderId) {
+                updatePowerZoneTracking(r, ftp);
+            }
+        });
+
         // Get reference rider ID (ego or focal rider)
         let referenceRiderId = null;
         if (ego) {
@@ -823,6 +968,11 @@ window.stopGroupSpectate = function() {
         }
         if (!referenceRider) {
             referenceRider = activeRiders[0] || finishedRiders[0];
+        }
+
+        // Display power zones for the reference rider (the one we're watching)
+        if (referenceRider) {
+            displayPowerZonesForRider(referenceRider.riderId);
         }
         const referenceLap = referenceRider?.lap || 1;
         const referenceDist = referenceRider?.lapDistance || 0;
@@ -868,16 +1018,21 @@ window.stopGroupSpectate = function() {
 
             // Only process groups if we have active riders
             if (groups.length > 0) {
-                breakaway = groups[0];
+                // If only one group, it's the peloton
+                if (groups.length === 1) {
+                    peloton = groups[0];
+                } else {
+                    breakaway = groups[0];
 
-                // --- 4. Identify Peloton (largest group) ---
-                peloton = groups.reduce((max, g) => g.length > max.length ? g : max, groups[0]);
+                    // --- 4. Identify Peloton (largest group) ---
+                    peloton = groups.reduce((max, g) => g.length > max.length ? g : max, groups[0]);
 
-                // --- 5. Ensure only 1 Peloton ---
-                if (breakaway.length > peloton.length) {
-                    let temp = peloton;
-                    peloton = breakaway;
-                    breakaway = temp;
+                    // --- 5. Ensure only 1 Peloton ---
+                    if (breakaway.length > peloton.length) {
+                        let temp = peloton;
+                        peloton = breakaway;
+                        breakaway = temp;
+                    }
                 }
             }
 
