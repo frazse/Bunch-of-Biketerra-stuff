@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra - Riderlist replacement HUD
 // @namespace    http://tampermonkey.net/
-// @version      12.9
-// @description  With sticky header, per-rider power zone tracking, finished riders group, and fixed single group labeling
+// @version      13.2
+// @description  With time gaps for groups, sticky group headers, per-rider power zone tracking, and persistent race data across refreshes
 // @author       You
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate*
@@ -18,6 +18,10 @@
     window.__tttTeamMap = {};
     window.__tttDataLoaded = false;
 
+    // --- Route/Event Tracking for Persistence ---
+    window.__currentRouteId = null;
+    window.__raceDataStorageKey = 'biketerraRaceData';
+
     // Store finished riders data
     window.__finishedRiders = {};
     window.__lastLapCounts = {}; // Track lap counts to detect lap completions
@@ -31,6 +35,127 @@
     window.__athleteFtpMap = {};
     window.__ftpQueue = [];
     window.__ftpBusy = false;
+
+// Load race data from storage if it exists for this route
+function loadRaceData() {
+    try {
+        const stored = JSON.parse(localStorage.getItem(window.__raceDataStorageKey) || "{}");
+        const routeId = window.__currentRouteId;
+
+        if (stored.routeId === routeId && stored.data) {
+            console.log(`📊 Restoring race data for route ${routeId}`);
+
+            // Restore power zones
+            if (stored.data.powerZones) {
+                window.__riderPowerZones = stored.data.powerZones;
+                console.log(`✅ Restored power zones for ${Object.keys(window.__riderPowerZones).length} riders`);
+            }
+
+            // Restore zone update timestamps
+            if (stored.data.zoneUpdates) {
+                window.__lastZoneUpdate = stored.data.zoneUpdates;
+            }
+
+            // Restore finished riders
+            if (stored.data.finishedRiders) {
+                window.__finishedRiders = stored.data.finishedRiders;
+                console.log(`✅ Restored ${Object.keys(window.__finishedRiders).length} finished riders`);
+            }
+
+            // Restore lap counts
+            if (stored.data.lapCounts) {
+                window.__lastLapCounts = stored.data.lapCounts;
+            }
+
+            return true;
+        }
+
+        return false;
+    } catch (e) {
+        console.error("Failed to load race data:", e);
+        return false;
+    }
+}
+
+// Save race data to storage
+function saveRaceData() {
+    try {
+        const data = {
+            routeId: window.__currentRouteId,
+            timestamp: Date.now(),
+            data: {
+                powerZones: window.__riderPowerZones,
+                zoneUpdates: window.__lastZoneUpdate,
+                finishedRiders: window.__finishedRiders,
+                lapCounts: window.__lastLapCounts
+            }
+        };
+
+        localStorage.setItem(window.__raceDataStorageKey, JSON.stringify(data));
+    } catch (e) {
+        console.error("Failed to save race data:", e);
+    }
+}
+
+// Clear race data (called when route changes)
+function clearRaceData() {
+    console.log("🗑️ Clearing race data for route change");
+    window.__riderPowerZones = {};
+    window.__lastZoneUpdate = {};
+    window.__finishedRiders = {};
+    window.__lastLapCounts = {};
+    localStorage.removeItem(window.__raceDataStorageKey);
+}
+
+// Detect route/event changes
+function detectRouteChange() {
+    // Try to get route ID from URL or game manager
+    let routeId = null;
+
+    // First try URL
+    const urlMatch = window.location.href.match(/\/(?:ride|spectate)\/([^\/\?]+)/);
+    if (urlMatch) {
+        routeId = urlMatch[1];
+    }
+
+    // Also try to get from game manager if available
+    if (window.gameManager?.ego?.currentPath?.road?.id !== undefined) {
+        routeId = routeId + '_' + window.gameManager.ego.currentPath.road.id;
+    }
+
+    if (routeId && routeId !== window.__currentRouteId) {
+        if (window.__currentRouteId !== null) {
+            console.log(`🔄 Route changed: ${window.__currentRouteId} → ${routeId}`);
+            clearRaceData();
+        } else {
+            console.log(`🏁 Initial route detected: ${routeId}`);
+        }
+
+        window.__currentRouteId = routeId;
+        loadRaceData();
+    }
+}
+
+// Check for route changes periodically
+setInterval(detectRouteChange, 2000);
+
+// Initial route detection
+detectRouteChange();
+
+// Save data periodically (every 10 seconds)
+setInterval(() => {
+    if (window.__currentRouteId) {
+        saveRaceData();
+    }
+}, 10000);
+
+// Save on page unload
+window.addEventListener('beforeunload', () => {
+    if (window.__currentRouteId) {
+        saveRaceData();
+    }
+});
+
 (() => {
     const cache = loadFtpCache();
     if (cache?.riders) {
@@ -167,6 +292,8 @@ function queueRidersForFtp(riders) {
                                 });
                                 window.__tttDataLoaded = true;
                                 console.log("🏁 TTT teams loaded:", window.__tttTeamMap);
+                                console.log("🏁 TTT map keys (first 10):", Object.keys(window.__tttTeamMap).slice(0, 10));
+                                console.log("🏁 TTT teams data:", teamsObj);
                                 found = true;
                             } catch (err) {
                                 console.error("TTT JSON parse error:", err, teamsString);
@@ -360,7 +487,7 @@ window.stopGroupSpectate = function() {
 
     waitFor(".rider-list-footer").then(el => {
         if(el) {
-            el.style.paddingTop = '.09rem';
+            el.style.paddingTop = '0rem';
             el.style.paddingRight = '.4rem';
         }
     }).catch(() => {});
@@ -393,6 +520,21 @@ window.stopGroupSpectate = function() {
             scrollbar-width: thin;
             scrollbar-color: rgba(255,255,255,0.3) rgba(0,0,0,0.2);
         }
+
+        /* Sticky group headers */
+        .group-header-sticky {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            background: rgba(255,255,255,0.15);
+        }
+
+        .finished-header-sticky {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            background: rgba(50,205,50,0.3);
+        }
     `;
     document.head.appendChild(style);
 
@@ -403,7 +545,7 @@ window.stopGroupSpectate = function() {
         position: fixed;
         top: 8px;
         right: 8px;
-        width: 25vw;
+        width: 30vw;
         min-width: 350px;
         background: rgba(0,0,0,0.5);
         color: #00ffcc;
@@ -434,7 +576,7 @@ window.stopGroupSpectate = function() {
                 ">🗊</button>
             </div>
             <div id="power-zone-widget" style="
-                background:rgba(0,0,0,0.7);
+                background:rgba(0,0,0,0.3);
                 padding:6px;
                 margin-bottom:6px;
                 border-radius:4px;
@@ -463,13 +605,13 @@ window.stopGroupSpectate = function() {
             </div>
             <table style="width:100%; border-collapse:collapse; table-layout:fixed;">
                 <colgroup>
-                    <col style="width:30%;">
+                    <col style="width:40%;">
                     <col style="width:10%;">
                     <col style="width:10%;">
                     <col style="width:10%;">
                     <col style="width:10%;">
                     <col style="width:15%;">
-                    <col style="width:15%;">
+                    <col style="width:5%;">
                 </colgroup>
                 <thead>
                     <tr style="text-align:left; color:#fff;">
@@ -487,13 +629,13 @@ window.stopGroupSpectate = function() {
         <div style="flex: 1; overflow-y: auto; padding: 0 10px 10px 10px;">
             <table style="width:100%; border-collapse:collapse; table-layout:fixed;">
                 <colgroup>
-                    <col style="width:30%;">
+                    <col style="width:40%;">
                     <col style="width:10%;">
                     <col style="width:10%;">
                     <col style="width:10%;">
                     <col style="width:10%;">
                     <col style="width:15%;">
-                    <col style="width:15%;">
+                    <col style="width:5%;">
                 </colgroup>
                 <tbody id="rider-table-body">
                     <tr><td colspan="7" style="text-align:center; color:#888;">Waiting for breakpoint...</td></tr>
@@ -521,13 +663,66 @@ window.stopGroupSpectate = function() {
         window.__lastGroupLeader = null; // Clear last leader tracking
     });
 
-    // Global function to toggle group
+    // FIXED: Improved toggle function with immediate DOM manipulation
     window.toggleGroup = function(groupId) {
         const collapsedKey = groupId + '-collapsed';
+
+        // Toggle the state
         if (expandedGroups.has(collapsedKey)) {
             expandedGroups.delete(collapsedKey);
         } else {
             expandedGroups.add(collapsedKey);
+        }
+
+        // IMMEDIATE visual feedback - find and toggle rows for this group
+        const isExpanded = !expandedGroups.has(collapsedKey);
+        const arrow = isExpanded ? '▲' : '▼';
+
+        // Find the group header row by searching for the groupId in onclick attribute
+        const allRows = tbody.querySelectorAll('tr');
+        let groupHeaderRow = null;
+
+        for (let i = 0; i < allRows.length; i++) {
+            const row = allRows[i];
+            const onclick = row.getAttribute('onclick');
+            if (onclick && onclick.includes(`toggleGroup('${groupId}')`)) {
+                groupHeaderRow = row;
+                break;
+            }
+        }
+
+        if (!groupHeaderRow) return;
+
+        // Update arrow in header immediately
+        const headerCell = groupHeaderRow.querySelector('td');
+        if (headerCell) {
+            const text = headerCell.innerHTML;
+            headerCell.innerHTML = text.replace(/^[▲▼]/, arrow);
+        }
+
+        // Toggle visibility of subsequent rows until we hit another group header or separator
+        let currentRow = groupHeaderRow.nextElementSibling;
+        while (currentRow) {
+            // Stop if we hit another group header (has onclick with toggleGroup or spectateGroupLeader)
+            const onclick = currentRow.getAttribute('onclick');
+            if (onclick && (onclick.includes('toggleGroup') || onclick.includes('spectateGroupLeader'))) {
+                break;
+            }
+
+            // Stop if we hit the spacer row (height:4px or height:8px)
+            const style = currentRow.getAttribute('style');
+            if (style && (style.includes('height:4px') || style.includes('height:8px'))) {
+                break;
+            }
+
+            // Toggle visibility
+            if (isExpanded) {
+                currentRow.style.display = '';
+            } else {
+                currentRow.style.display = 'none';
+            }
+
+            currentRow = currentRow.nextElementSibling;
         }
     };
 
@@ -612,6 +807,33 @@ window.stopGroupSpectate = function() {
         return null;
     }
 
+    // --- Calculate time gap from distance gap ---
+    function calculateTimeGap(distanceGapMeters, referenceSpeed, riderSpeed) {
+        // Use average speed between the two riders for more accuracy
+        const avgSpeed = (referenceSpeed + riderSpeed) / 2;
+
+        // Avoid division by zero
+        if (avgSpeed <= 0) return 0;
+
+        // Time = Distance / Speed (speed is in m/s, distance in meters, result in seconds)
+        return distanceGapMeters / avgSpeed;
+    }
+
+    // --- Format time gap for display ---
+    function formatTimeGap(seconds) {
+        const absSeconds = Math.abs(seconds);
+
+        if (absSeconds < 1) {
+            return "0s";
+        } else if (absSeconds < 60) {
+            return `${Math.round(absSeconds)}s`;
+        } else {
+            const mins = Math.floor(absSeconds / 60);
+            const secs = Math.round(absSeconds % 60);
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+    }
+
     // --- Rider row renderer ---
     function renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit, isFinished = false) {
         let name;
@@ -636,13 +858,8 @@ window.stopGroupSpectate = function() {
             gapText = "0m";
         } else if (r.lap !== referenceLap) {
             // Calculate actual distance gap using lap information
-            const lapDiff = r.lap - referenceLap;
-
-            // Calculate total distance traveled for each rider
-            // For the reference rider: (laps completed * lap distance) + current lap distance
             const referenceTotalDist = (referenceLap - 1) * globalLapLimit + referenceDist;
             const riderTotalDist = (r.lap - 1) * globalLapLimit + r.lapDistance;
-
             const gapMeters = riderTotalDist - referenceTotalDist;
 
             if (gapMeters === 0) gapText = "0m";
@@ -714,6 +931,7 @@ window.stopGroupSpectate = function() {
             }
         }
 
+        // Build background color
         let bgColor = helmetColor;
         if (helmetColor.startsWith('#') && helmetColor.length === 7) {
             const rC = parseInt(helmetColor.slice(1,3),16);
@@ -773,7 +991,7 @@ window.stopGroupSpectate = function() {
                 z1: 0, z2: 0, z3: 0, ss: 0, z4: 0, z5: 0, z6: 0, z7: 0
             };
         }
-        
+
         if (!window.__lastZoneUpdate[riderId]) {
             window.__lastZoneUpdate[riderId] = now;
             return; // Skip first update to establish baseline
@@ -808,7 +1026,7 @@ window.stopGroupSpectate = function() {
             Object.keys({ z1: 0, z2: 0, z3: 0, ss: 0, z4: 0, z5: 0, z6: 0, z7: 0 }).forEach(z => {
                 const bar = document.getElementById(`${z}-bar`);
                 if (bar) bar.style.flex = 0;
-                
+
                 const label = document.getElementById(`${z}-time`);
                 if (label) {
                     const zoneLabel = z === 'ss' ? 'SS' : z.toUpperCase();
@@ -820,7 +1038,7 @@ window.stopGroupSpectate = function() {
 
         const zones = window.__riderPowerZones[riderId];
         const totalTime = Object.values(zones).reduce((a, b) => a + b, 0);
-        
+
         // Update bars
         Object.keys(zones).forEach(z => {
             const bar = document.getElementById(`${z}-bar`);
@@ -850,6 +1068,41 @@ window.stopGroupSpectate = function() {
             }
         });
     }
+function autoFitTableText(tbody, options = {}) {
+    const {
+        minFontSize = 9,
+        maxFontSize = 15,
+        step = 0.5
+    } = options;
+
+    const rows = tbody.querySelectorAll('tr');
+
+    rows.forEach(row => {
+        const cells = row.children;
+        if (!cells) return;
+
+        [...cells].forEach(cell => {
+            // Skip group headers / spacers
+            if (cell.colSpan > 1) return;
+
+            const style = window.getComputedStyle(cell);
+            let fontSize = parseFloat(style.fontSize);
+
+            // Reset first so shrinking is repeatable
+            fontSize = Math.min(fontSize, maxFontSize);
+            cell.style.fontSize = fontSize + 'px';
+
+            // Shrink until it fits or we hit min size
+            while (
+                cell.scrollWidth > cell.clientWidth &&
+                fontSize > minFontSize
+            ) {
+                fontSize -= step;
+                cell.style.fontSize = fontSize + 'px';
+            }
+        });
+    });
+}
 
     setInterval(() => {
         if (!window.hackedRiders && Object.keys(window.__finishedRiders).length === 0) {
@@ -957,14 +1210,14 @@ window.stopGroupSpectate = function() {
         // --- Track power zones for ALL riders ---
         riders.forEach(r => {
             let ftp = null;
-            
+
             // Get FTP for this rider
             if (r.isMe && ego?.userData?.ftp) {
                 ftp = ego.userData.ftp;
             } else if (window.__athleteFtpMap[r.riderId]) {
                 ftp = window.__athleteFtpMap[r.riderId];
             }
-            
+
             // Update tracking for this rider
             if (ftp && r.power && r.riderId) {
                 updatePowerZoneTracking(r, ftp);
@@ -999,33 +1252,86 @@ window.stopGroupSpectate = function() {
 
         if (isGroupView) {
             const groups = [];
-            let currentGroup = [];
+            const ungroupedRiders = [...activeRiders];
 
-            // --- 1. Build groups based on distance (only for active riders) ---
-            activeRiders.forEach((r, idx) => {
-                if (currentGroup.length === 0) {
-                    currentGroup.push(r);
-                } else {
-                    const lastRider = currentGroup[currentGroup.length - 1];
-                    const gap = lastRider.lapDistance - r.lapDistance;
+            // --- 1. Build TTT team groups FIRST (if TTT data is loaded) ---
+            if (window.__tttDataLoaded) {
+                const teamGroups = {};
 
-                    if (gap <= GROUP_DISTANCE && r.lap === lastRider.lap) {
+                // Group riders by team - try multiple key formats
+                activeRiders.forEach(r => {
+                    const id = r.riderId;
+                    // Try multiple formats: string, number, and both with/without type coercion
+                    let teamName = window.__tttTeamMap[String(id)]
+                                || window.__tttTeamMap[id]
+                                || window.__tttTeamMap[String(id).toString()];
+
+                    if (teamName) {
+                        if (!teamGroups[teamName]) {
+                            teamGroups[teamName] = [];
+                        }
+                        teamGroups[teamName].push(r);
+                        console.log(`✅ Rider ${r.name} (ID: ${id}) assigned to TTT team: ${teamName}`);
+                    } else {
+                        // Debug: log riders that don't match
+                        const mapKeys = Object.keys(window.__tttTeamMap);
+                        if (mapKeys.length > 0) {
+                            console.log(`❌ Rider ${r.name} (ID: ${id}, type: ${typeof id}) not found in TTT map. Map keys sample:`, mapKeys.slice(0, 3));
+                        }
+                    }
+                });
+
+                // Add team groups to main groups array and remove from ungrouped
+                Object.entries(teamGroups).forEach(([teamName, teamRiders]) => {
+                    if (teamRiders.length > 0) {
+                        groups.push(teamRiders);
+                        console.log(`🏁 Created TTT group: ${teamName} with ${teamRiders.length} riders`);
+                        // Remove these riders from ungrouped list
+                        teamRiders.forEach(tr => {
+                            const idx = ungroupedRiders.findIndex(ur => ur.riderId === tr.riderId);
+                            if (idx !== -1) ungroupedRiders.splice(idx, 1);
+                        });
+                    }
+                });
+            }
+
+            // --- 2. Build distance-based groups from remaining riders ---
+            // ONLY do distance-based grouping if this is NOT a TTT race
+            // In TTT races, ALL riders should be in team groups, so skip distance grouping
+            if (!window.__tttDataLoaded) {
+                let currentGroup = [];
+                ungroupedRiders.forEach((r, idx) => {
+                    if (currentGroup.length === 0) {
                         currentGroup.push(r);
                     } else {
-                        groups.push([...currentGroup]);
-                        currentGroup = [r];
-                    }
-                }
-            });
-            if (currentGroup.length > 0) groups.push(currentGroup);
+                        const lastRider = currentGroup[currentGroup.length - 1];
+                        const gap = lastRider.lapDistance - r.lapDistance;
 
-            // --- 2. Compute lead distance and lap for each group ---
+                        if (gap <= GROUP_DISTANCE && r.lap === lastRider.lap) {
+                            currentGroup.push(r);
+                        } else {
+                            groups.push([...currentGroup]);
+                            currentGroup = [r];
+                        }
+                    }
+                });
+                if (currentGroup.length > 0) groups.push(currentGroup);
+            } else {
+                // In TTT races, if there are any ungrouped riders, create individual groups for them
+                // (This handles edge cases where a rider might not be in the TTT data)
+                ungroupedRiders.forEach(r => {
+                    groups.push([r]);
+                    console.log(`⚠️ Ungrouped rider in TTT race: ${r.name} (ID: ${r.riderId})`);
+                });
+            }
+
+            // --- 3. Compute lead distance and lap for each group ---
             groups.forEach(g => {
                 g.leadLap = Math.max(...g.map(r => r.lap));
                 g.leadDist = Math.max(...g.map(r => r.lapDistance + (r.lap - 1) * globalLapLimit));
             });
 
-            // --- 3. Sort groups by lap then distance, Identify Breakaway (front-most group) ---
+            // --- 4. Sort groups by lap then distance, Identify Breakaway (front-most group) ---
             groups.sort((a, b) => {
                 if (b.leadLap !== a.leadLap) return b.leadLap - a.leadLap;
                 return b.leadDist - a.leadDist;
@@ -1042,10 +1348,10 @@ window.stopGroupSpectate = function() {
                 } else {
                     breakaway = groups[0];
 
-                    // --- 4. Identify Peloton (largest group) ---
+                    // --- 5. Identify Peloton (largest group) ---
                     peloton = groups.reduce((max, g) => g.length > max.length ? g : max, groups[0]);
 
-                    // --- 5. Ensure only 1 Peloton ---
+                    // --- 6. Ensure only 1 Peloton ---
                     if (breakaway.length > peloton.length) {
                         let temp = peloton;
                         peloton = breakaway;
@@ -1054,14 +1360,14 @@ window.stopGroupSpectate = function() {
                 }
             }
 
-            // --- 6. Render Finished group first if there are finished riders ---
+            // --- 7. Render Finished group first if there are finished riders ---
             if (finishedRiders.length > 0) {
                 const groupId = 'group-finished';
                 const isExpanded = !expandedGroups.has(groupId + '-collapsed');
                 const arrow = isExpanded ? '▲' : '▼';
 
                 html += `
-                    <tr style="background:rgba(50,205,50,0.3); cursor:pointer; font-family:'Overpass',sans-serif;"
+                    <tr class="finished-header-sticky" style="cursor:pointer; font-family:'Overpass',sans-serif;"
                         onclick="event.stopPropagation(); window.toggleGroup('${groupId}');"
                         title="Click to expand/collapse">
                         <td colspan="7" style="padding:6px; color:#fff; font-weight:bold;">
@@ -1082,7 +1388,7 @@ window.stopGroupSpectate = function() {
                 html += `<tr style="height:4px;"><td colspan="7"></td></tr>`;
             }
 
-            // --- 7. Render active groups ---
+            // --- 8. Render active groups ---
             let chaseCounter = 1;
             let stragglersCounter = 1;
 
@@ -1092,35 +1398,56 @@ window.stopGroupSpectate = function() {
                 const groupId = `group-${groupIdx}`;
                 const isExpanded = !expandedGroups.has(groupId + '-collapsed');
 
+                // Calculate time gap for this group
+                let groupTimeGap = "";
+                if (groupIdx > 0) {
+                    // Calculate distance gap to the front group
+                    const frontGroup = groups[0];
+                    const frontGroupLeadDist = frontGroup.leadDist;
+                    const thisGroupLeadDist = group.leadDist;
+                    const distGap = frontGroupLeadDist - thisGroupLeadDist;
+
+                    // Use the average speed of both groups for time calculation
+                    const frontGroupAvgSpeed = frontGroup.reduce((sum, r) => sum + r.speed, 0) / frontGroup.length;
+                    const thisGroupAvgSpeed = group.reduce((sum, r) => sum + r.speed, 0) / group.length;
+                    const avgSpeedBoth = (frontGroupAvgSpeed + thisGroupAvgSpeed) / 2;
+
+                    const timeGap = calculateTimeGap(distGap, avgSpeedBoth, avgSpeedBoth);
+                    groupTimeGap = ` +${formatTimeGap(timeGap)}`;
+                }
+
                 // Determine group label
                 let groupLabel = "";
-                if (breakaway && group === breakaway) groupLabel = `Breakaway - ${groupSize} rider${groupSize>1?'s':''}`;
-                else if (peloton && group === peloton) groupLabel = `Peloton - ${groupSize} rider${groupSize>1?'s':''}`;
-                else if (breakaway && peloton && group.leadDist < breakaway.leadDist && group.leadDist > peloton.leadDist) {
+
+                // Check if this is a TTT team group
+                const teamNames = new Set(
+                    group
+                        .map(r => window.__tttTeamMap[String(r.riderId)])
+                        .filter(Boolean)
+                );
+                const isTTTTeam = window.__tttDataLoaded && teamNames.size === 1 && group.length > 1;
+
+                if (isTTTTeam) {
+                    groupLabel = [...teamNames][0];
+                } else if (breakaway && group === breakaway) {
+                    groupLabel = `Breakaway - ${groupSize} rider${groupSize>1?'s':''}`;
+                } else if (peloton && group === peloton) {
+                    groupLabel = `Peloton - ${groupSize} rider${groupSize>1?'s':''}`;
+                } else if (breakaway && peloton && group.leadDist < breakaway.leadDist && group.leadDist > peloton.leadDist) {
                     groupLabel = `Chase Group ${chaseCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
                 } else {
                     groupLabel = `Stragglers ${stragglersCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
                 }
 
-                // TTT team detection
-                if (window.__tttDataLoaded && group.length > 1) {
-                    const teamNames = new Set(
-                        group
-                            .map(r => window.__tttTeamMap[String(r.riderId)])
-                            .filter(Boolean)
-                    );
-                    if (teamNames.size === 1) groupLabel = [...teamNames][0];
-                }
-
                 const arrow = isExpanded ? '▲' : '▼';
 
-                // Always show group header
+                // Always show group header with sticky positioning
                 html += `
-                    <tr style="background:rgba(255,255,255,0.15); cursor:pointer; font-family:'Overpass',sans-serif;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;"
+                    <tr class="group-header-sticky" style="cursor:pointer; font-family:'Overpass',sans-serif;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;"
                         onclick="if(event.ctrlKey) { window.spectateGroupLeader(${groupIdx}); } else { event.stopPropagation(); window.toggleGroup('${groupId}'); }"
                         title="Click to expand/collapse, Ctrl+Click to spectate leader">
                         <td colspan="7" style="padding:6px; color:#fff; font-weight:bold;">
-                            ${arrow} ${groupLabel} (${avgSpeed} kph)
+                            ${arrow} ${groupLabel} (${avgSpeed} kph)${groupTimeGap}
                         </td>
                     </tr>
                 `;
@@ -1155,6 +1482,12 @@ window.stopGroupSpectate = function() {
         }
 
         tbody.innerHTML = html;
+        autoFitTableText(tbody, {
+    minFontSize: 9,
+    maxFontSize: 15,
+    step: 0.5
+});
+
 
         // --- Auto-update group spectate if active ---
         if (window.activeGroupSpectate !== null) {
