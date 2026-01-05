@@ -502,7 +502,13 @@ window.stopGroupSpectate = function() {
             el.style.paddingRight = '.4rem';
         }
     }).catch(() => {});
-    waitFor(".view-toggle").then(el => {
+        waitFor(".view-toggle").then(el => {
+        if(el) {
+            el.style.paddingTop = '0rem';
+            el.style.paddingRight = '.4rem';
+        }
+    }).catch(() => {});
+    waitFor(".view-toggle button").then(el => {
         if(el) el.style.display = 'none';
     }).catch(() => {});
 
