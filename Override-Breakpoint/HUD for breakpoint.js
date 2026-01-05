@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra - Riderlist replacement HUD
 // @namespace    http://tampermonkey.net/
-// @version      13.2
-// @description  With time gaps for groups, sticky group headers, per-rider power zone tracking, and persistent race data across refreshes
+// @version      13.3
+// @description  With time gaps for groups, sticky group headers, per-rider power zone tracking, and persistent race data across refreshes (Fixed rider ID 0 handling)
 // @author       You
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate*
@@ -109,21 +109,23 @@ function clearRaceData() {
 
 // Detect route/event changes
 function detectRouteChange() {
-    // Try to get route ID from URL or game manager
+    // Get route or event ID from URL query parameters
     let routeId = null;
 
-    // First try URL
-    const urlMatch = window.location.href.match(/\/(?:ride|spectate)\/([^\/\?]+)/);
-    if (urlMatch) {
-        routeId = urlMatch[1];
+    const urlParams = new URLSearchParams(window.location.search);
+
+    if (urlParams.has('event')) {
+        routeId = 'event_' + urlParams.get('event');
+    } else if (urlParams.has('route')) {
+        routeId = 'route_' + urlParams.get('route');
     }
 
-    // Also try to get from game manager if available
-    if (window.gameManager?.ego?.currentPath?.road?.id !== undefined) {
-        routeId = routeId + '_' + window.gameManager.ego.currentPath.road.id;
+    // If we don't have a valid route ID, don't proceed
+    if (!routeId) {
+        return; // Wait until we have valid route data
     }
 
-    if (routeId && routeId !== window.__currentRouteId) {
+    if (routeId !== window.__currentRouteId) {
         if (window.__currentRouteId !== null) {
             console.log(`🔄 Route changed: ${window.__currentRouteId} → ${routeId}`);
             clearRaceData();
@@ -222,7 +224,14 @@ function queueRidersForFtp(riders) {
 
     riders.forEach(r => {
         const id = r.riderId;
-        if (!id) return;
+        // FIXED: Handle rider ID 0 properly
+        if (id === undefined || id === null) return;
+
+        // Skip fetching FTP for ego rider - we already have it from gameManager
+        if (r.isMe && window.gameManager?.ego?.userData?.ftp) {
+            window.__athleteFtpMap[id] = window.gameManager.ego.userData.ftp;
+            return;
+        }
 
         const riderCache = cache.riders[id];
         const stale = !riderCache || shouldRefreshMonthly({ lastRefresh: riderCache.updated });
@@ -234,7 +243,8 @@ function queueRidersForFtp(riders) {
         }
 
         // Queue if missing or monthly refresh
-        if (!window.__athleteFtpMap[id] && !window.__ftpQueue.includes(id)) {
+        // FIXED: Use explicit check instead of truthy check
+        if (window.__athleteFtpMap[id] === undefined && !window.__ftpQueue.includes(id)) {
             window.__ftpQueue.push(id);
         }
     });
@@ -361,7 +371,8 @@ if (location.href.startsWith("https://biketerra.com/spectate")) {
             console.error("Game Manager not exposed. Is breakpoint active?");
             return;
         }
-        if (!riderId) {
+        // FIXED: Handle rider ID 0 properly
+        if (riderId === undefined || riderId === null) {
              console.warn("Cannot spectate: Rider ID is null or undefined.");
              return;
         }
@@ -947,8 +958,11 @@ window.stopGroupSpectate = function() {
             ${highlightStyle}
         `;
 
+        // FIXED: Handle rider ID 0 in onclick
+        const onclickAttr = r.isMe ? "" : `onclick="window.spectateRiderById(${r.riderId})"`;
+
         return `
-            <tr style="${rowStyle}" onclick="window.spectateRiderById(${r.riderId || 0})">
+            <tr style="${rowStyle}" ${onclickAttr}>
                 <td style="padding:4px;font-size:13px; color:#fff;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${name}</td>
                 <td style="padding:4px;font-size:13px;color:#fff; font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${power}</td>
                 <td style="padding:4px;font-size:13px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${speed}</td>
@@ -980,7 +994,8 @@ window.stopGroupSpectate = function() {
     }
 
     function updatePowerZoneTracking(rider, ftp) {
-        if (!rider || !ftp || !rider.riderId) return;
+        // FIXED: Handle rider ID 0 properly
+        if (!rider || !ftp || rider.riderId === undefined || rider.riderId === null) return;
 
         const riderId = rider.riderId;
         const now = Date.now();
@@ -990,9 +1005,10 @@ window.stopGroupSpectate = function() {
             window.__riderPowerZones[riderId] = {
                 z1: 0, z2: 0, z3: 0, ss: 0, z4: 0, z5: 0, z6: 0, z7: 0
             };
+            console.log(`🎯 Initialized power zone tracking for rider ${riderId}`);
         }
 
-        if (!window.__lastZoneUpdate[riderId]) {
+        if (window.__lastZoneUpdate[riderId] === undefined) {
             window.__lastZoneUpdate[riderId] = now;
             return; // Skip first update to establish baseline
         }
@@ -1021,7 +1037,8 @@ window.stopGroupSpectate = function() {
     }
 
     function displayPowerZonesForRider(riderId) {
-        if (!riderId || !window.__riderPowerZones[riderId]) {
+        // FIXED: Handle rider ID 0 properly - use explicit undefined check
+        if (riderId === undefined || riderId === null || !window.__riderPowerZones[riderId]) {
             // No data yet - show zeros
             Object.keys({ z1: 0, z2: 0, z3: 0, ss: 0, z4: 0, z5: 0, z6: 0, z7: 0 }).forEach(z => {
                 const bar = document.getElementById(`${z}-bar`);
@@ -1214,12 +1231,13 @@ function autoFitTableText(tbody, options = {}) {
             // Get FTP for this rider
             if (r.isMe && ego?.userData?.ftp) {
                 ftp = ego.userData.ftp;
-            } else if (window.__athleteFtpMap[r.riderId]) {
+            } else if (window.__athleteFtpMap[r.riderId] !== undefined) {
                 ftp = window.__athleteFtpMap[r.riderId];
             }
 
             // Update tracking for this rider
-            if (ftp && r.power && r.riderId) {
+            // FIXED: Explicit check for rider ID and power
+            if (ftp && r.power && (r.riderId === 0 || r.riderId)) {
                 updatePowerZoneTracking(r, ftp);
             }
         });
