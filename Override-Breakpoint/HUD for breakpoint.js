@@ -109,19 +109,30 @@ function clearRaceData() {
 
 // Detect route/event changes
 function detectRouteChange() {
-    // Get route or event ID from URL query parameters
+    // Get route or event ID from URL
     let routeId = null;
 
-    const urlParams = new URLSearchParams(window.location.search);
+    // Check if we're spectating (path-based ID)
+    if (window.location.pathname.startsWith('/spectate/')) {
+        const spectateId = window.location.pathname.split('/spectate/')[1];
+        if (spectateId) {
+            routeId = 'spectate_' + spectateId;
+        }
+    }
+    // Check for ride with query parameters
+    else if (window.location.pathname.startsWith('/ride')) {
+        const urlParams = new URLSearchParams(window.location.search);
 
-    if (urlParams.has('event')) {
-        routeId = 'event_' + urlParams.get('event');
-    } else if (urlParams.has('route')) {
-        routeId = 'route_' + urlParams.get('route');
+        if (urlParams.has('event')) {
+            routeId = 'event_' + urlParams.get('event');
+        } else if (urlParams.has('route')) {
+            routeId = 'route_' + urlParams.get('route');
+        }
     }
 
     // If we don't have a valid route ID, don't proceed
     if (!routeId) {
+        console.log("⏳ Waiting for route ID... (current URL:", window.location.href, ")");
         return; // Wait until we have valid route data
     }
 
@@ -137,7 +148,6 @@ function detectRouteChange() {
         loadRaceData();
     }
 }
-
 // Check for route changes periodically
 setInterval(detectRouteChange, 2000);
 
@@ -181,26 +191,56 @@ function extractFtpFromProfileHTML(html) {
 async function fetchAndCacheAthleteFTP(athleteId) {
     const cache = loadFtpCache();
     cache.riders ||= {};
+    cache.failedFetches ||= {}; // Track riders with private profiles
 
-    const res = await fetch(`/athletes/${athleteId}`, {
-        credentials: "include"
-    });
+    try {
+        const res = await fetch(`/athletes/${athleteId}`, {
+            credentials: "include"
+        });
 
-    const html = await res.text();
-    const ftp = extractFtpFromProfileHTML(html);
+        // Handle 403 (private profile) - set default FTP and mark as failed
+        if (res.status === 403) {
+            console.log(`⚠️ Athlete ${athleteId} has a private profile, using default FTP (200W)`);
 
-    if (!ftp) return null;
+            const defaultFtp = 200;
+            cache.riders[athleteId] = {
+                ftp: defaultFtp,
+                updated: new Date().toISOString().slice(0, 10),
+                isDefault: true // Mark this as a default value
+            };
 
-    cache.riders[athleteId] = {
-        ftp,
-        updated: new Date().toISOString().slice(0, 10)
-    };
+            // Track this athlete for retry during monthly refresh
+            cache.failedFetches[athleteId] = new Date().toISOString().slice(0, 10);
 
-    cache.lastRefresh = new Date().toISOString().slice(0, 10);
-    saveFtpCache(cache);
+            saveFtpCache(cache);
+            window.__athleteFtpMap[athleteId] = defaultFtp;
+            return defaultFtp;
+        }
 
-    window.__athleteFtpMap[athleteId] = ftp;
-    return ftp;
+        const html = await res.text();
+        const ftp = extractFtpFromProfileHTML(html);
+
+        if (!ftp) return null;
+
+        cache.riders[athleteId] = {
+            ftp,
+            updated: new Date().toISOString().slice(0, 10)
+        };
+
+        // Remove from failed fetches if it was there (profile became public)
+        if (cache.failedFetches && cache.failedFetches[athleteId]) {
+            delete cache.failedFetches[athleteId];
+        }
+
+        cache.lastRefresh = new Date().toISOString().slice(0, 10);
+        saveFtpCache(cache);
+
+        window.__athleteFtpMap[athleteId] = ftp;
+        return ftp;
+    } catch (error) {
+        console.warn(`Failed to fetch FTP for athlete ${athleteId}:`, error);
+        return null;
+    }
 }
 
 function saveFtpCache(cache) {
@@ -221,6 +261,7 @@ function shouldRefreshMonthly(cache) {
 function queueRidersForFtp(riders) {
     const cache = loadFtpCache();
     cache.riders ||= {};
+    cache.failedFetches ||= {};
 
     riders.forEach(r => {
         const id = r.riderId;
@@ -234,17 +275,24 @@ function queueRidersForFtp(riders) {
         }
 
         const riderCache = cache.riders[id];
+        const isDefaultFtp = riderCache?.isDefault === true;
+        const wasFailedFetch = cache.failedFetches && cache.failedFetches[id];
         const stale = !riderCache || shouldRefreshMonthly({ lastRefresh: riderCache.updated });
 
-        // Load cached FTP immediately if available
+        // Load cached FTP immediately if available (including default FTP)
         if (cache.riders[id]?.ftp) {
             window.__athleteFtpMap[id] = cache.riders[id].ftp;
-            return;
         }
 
-        // Queue if missing or monthly refresh
+        // Queue for refresh if:
+        // 1. No FTP data exists
+        // 2. Monthly refresh is due AND (it's a default FTP OR it was a failed fetch)
+        const shouldQueue =
+            window.__athleteFtpMap[id] === undefined ||
+            (stale && (isDefaultFtp || wasFailedFetch));
+
         // FIXED: Use explicit check instead of truthy check
-        if (window.__athleteFtpMap[id] === undefined && !window.__ftpQueue.includes(id)) {
+        if (shouldQueue && !window.__ftpQueue.includes(id)) {
             window.__ftpQueue.push(id);
         }
     });
@@ -507,9 +555,13 @@ window.stopGroupSpectate = function() {
             el.style.paddingTop = '0rem';
             el.style.paddingRight = '.4rem';
         }
+
     }).catch(() => {});
+
     waitFor(".view-toggle button").then(el => {
-        if(el) el.style.display = 'none';
+        if(el && !el.classList.contains('latency')) {
+            el.style.display = 'none';
+        }
     }).catch(() => {});
 
     // --- Add custom scrollbar styling ---
@@ -541,19 +593,84 @@ window.stopGroupSpectate = function() {
         /* Sticky group headers */
         .group-header-sticky {
             position: sticky;
-            top: 0;
+            top: 20px;
             z-index: 10;
             background: rgba(255,255,255,0.15);
         }
 
         .finished-header-sticky {
             position: sticky;
-            top: 0;
+            top: 20px;
             z-index: 10;
             background: rgba(50,205,50,0.3);
         }
+        /* When a group header is hidden (content scrolled away), don't make it sticky */
+        .group-header-sticky.hide-sticky,
+        .finished-header-sticky.hide-sticky {
+            position: relative;
+            top: auto;
+        }
+        /* Hide sticky headers when their group content is not visible */
+        .group-header-sticky.hide-sticky,
+        .finished-header-sticky.hide-sticky {
+            position: relative;
+        }
     `;
     document.head.appendChild(style);
+
+    // --- Manage sticky header visibility on scroll ---
+    function manageStickyHeaders() {
+        if (!scrollContainer) return;
+
+        const containerRect = scrollContainer.getBoundingClientRect();
+        const headers = scrollContainer.querySelectorAll('.group-header-sticky, .finished-header-sticky');
+
+        headers.forEach(header => {
+            // Find all rows belonging to this group (until next header or spacer)
+            const groupRows = [];
+            let currentRow = header.nextElementSibling;
+
+            while (currentRow) {
+                const onclick = currentRow.getAttribute('onclick');
+                const style = currentRow.getAttribute('style');
+
+                // Stop if we hit another header
+                if (currentRow.classList.contains('group-header-sticky') ||
+                    currentRow.classList.contains('finished-header-sticky')) {
+                    break;
+                }
+
+                // Stop if we hit a spacer row
+                if (style && (style.includes('height:4px') || style.includes('height:8px'))) {
+                    break;
+                }
+
+                groupRows.push(currentRow);
+                currentRow = currentRow.nextElementSibling;
+            }
+
+            // Check if any group rows are visible in the container
+            let anyVisible = false;
+            for (const row of groupRows) {
+                const rowRect = row.getBoundingClientRect();
+
+                // Check if row is visible within the scroll container
+                if (rowRect.bottom > containerRect.top &&
+                    rowRect.top < containerRect.bottom &&
+                    row.style.display !== 'none') {
+                    anyVisible = true;
+                    break;
+                }
+            }
+
+            // Hide sticky behavior if no content is visible
+            if (!anyVisible) {
+                header.classList.add('hide-sticky');
+            } else {
+                header.classList.remove('hide-sticky');
+            }
+        });
+    }
 
     // --- HUD Container ---
     const container = document.createElement('div');
@@ -620,6 +737,8 @@ window.stopGroupSpectate = function() {
                     <span id="z7-time" style="text-align:center;">Z7<br>0s</span>
                 </div>
             </div>
+        </div>
+        <div style="flex: 1; overflow-y: auto; overflow-x: hidden;">
             <table style="width:100%; border-collapse:collapse; table-layout:fixed;">
                 <colgroup>
                     <col style="width:40%;">
@@ -630,32 +749,19 @@ window.stopGroupSpectate = function() {
                     <col style="width:15%;">
                     <col style="width:5%;">
                 </colgroup>
-                <thead>
+                <thead style="position: sticky; top: 0; background: rgba(0,0,0,0.5); z-index: 11;">
                     <tr style="text-align:left; color:#fff;">
-                        <th style="padding:2px;">Name</th>
+                        <th style="padding:2px 2px 2px 10px;">Name</th>
                         <th style="padding:2px;">Power</th>
                         <th style="padding:2px;">Speed</th>
                         <th style="padding:2px;">W/kg</th>
                         <th style="padding:2px;">Gap</th>
                         <th style="padding:2px;">Dist</th>
-                        <th style="padding:2px;">Lap</th>
+                        <th style="padding:2px 10px 2px 2px;">Lap</th>
                     </tr>
                 </thead>
-            </table>
-        </div>
-        <div style="flex: 1; overflow-y: auto; padding: 0 10px 10px 10px;">
-            <table style="width:100%; border-collapse:collapse; table-layout:fixed;">
-                <colgroup>
-                    <col style="width:40%;">
-                    <col style="width:10%;">
-                    <col style="width:10%;">
-                    <col style="width:10%;">
-                    <col style="width:10%;">
-                    <col style="width:15%;">
-                    <col style="width:5%;">
-                </colgroup>
                 <tbody id="rider-table-body">
-                    <tr><td colspan="7" style="text-align:center; color:#888;">Waiting for breakpoint...</td></tr>
+                    <tr><td colspan="7" style="text-align:center; color:#888; padding: 10px;">Waiting for breakpoint...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -679,6 +785,68 @@ window.stopGroupSpectate = function() {
         window.activeGroupSpectate = null; // Clear group spectate tracking when switching views
         window.__lastGroupLeader = null; // Clear last leader tracking
     });
+
+    // --- Auto-scroll state ---
+    let lastManualScroll = 0;
+    let autoScrollEnabled = true;
+    const MANUAL_SCROLL_TIMEOUT = 5000; // 5 seconds
+
+    // Get the scrollable container
+    const scrollContainer = document.querySelector('#rider-list-container > div:last-child');
+
+    // Detect manual scrolling
+    if (scrollContainer) {
+        scrollContainer.addEventListener('scroll', () => {
+            // Only consider it manual scroll if auto-scroll isn't currently running
+            if (!scrollContainer.dataset.isAutoScrolling) {
+                lastManualScroll = Date.now();
+                autoScrollEnabled = false;
+            }
+        });
+
+        // Re-enable auto-scroll after timeout
+        setInterval(() => {
+            if (!autoScrollEnabled && Date.now() - lastManualScroll > MANUAL_SCROLL_TIMEOUT) {
+                autoScrollEnabled = true;
+            }
+        }, 1000);
+    }
+
+    // Function to scroll to user's row
+    function scrollToUserRow() {
+        if (!autoScrollEnabled || !scrollContainer) return;
+
+        // Find the user's row (has the red outline)
+        const userRow = tbody.querySelector('tr[style*="outline: 2px solid #FF6262"]');
+        if (!userRow) return;
+
+        // Mark that we're auto-scrolling
+        scrollContainer.dataset.isAutoScrolling = 'true';
+
+        const containerRect = scrollContainer.getBoundingClientRect();
+        const rowRect = userRow.getBoundingClientRect();
+
+        // Calculate the center position
+        const containerCenter = containerRect.top + (containerRect.height / 2);
+        const rowCenter = rowRect.top + (rowRect.height / 2);
+        const scrollOffset = rowCenter - containerCenter;
+
+        // Smooth scroll to center the user's row
+        scrollContainer.scrollBy({
+            top: scrollOffset,
+            behavior: 'smooth'
+        });
+
+        // Clear the auto-scrolling flag after animation completes
+        setTimeout(() => {
+            delete scrollContainer.dataset.isAutoScrolling;
+        }, 500);
+    }
+
+    // Attach scroll listener for sticky headers
+    if (scrollContainer) {
+        scrollContainer.addEventListener('scroll', manageStickyHeaders);
+    }
 
     // FIXED: Improved toggle function with immediate DOM manipulation
     window.toggleGroup = function(groupId) {
@@ -969,13 +1137,13 @@ window.stopGroupSpectate = function() {
 
         return `
             <tr style="${rowStyle}" ${onclickAttr}>
-                <td style="padding:4px;font-size:13px; color:#fff;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${name}</td>
+                <td style="padding:4px 4px 4px 10px;font-size:13px; color:#fff;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${name}</td>
                 <td style="padding:4px;font-size:13px;color:#fff; font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${power}</td>
                 <td style="padding:4px;font-size:13px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${speed}</td>
                 <td style="padding:4px;font-size:15px;color:${wkgColor}; font-weight:bold; font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${wkg}</td>
                 <td style="padding:4px;font-size:13px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${gapText}</td>
                 <td style="padding:4px;font-size:13px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${dist}m</td>
-                <td style="padding:4px;font-size:13px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${r.lap}</td>
+                <td style="padding:4px 10px 4px 4px;font-size:13px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${r.lap}</td>
             </tr>
         `;
     }
@@ -1014,10 +1182,19 @@ window.stopGroupSpectate = function() {
             console.log(`🎯 Initialized power zone tracking for rider ${riderId}`);
         }
 
-        if (window.__lastZoneUpdate[riderId] === undefined) {
-            window.__lastZoneUpdate[riderId] = now;
-            return; // Skip first update to establish baseline
+if (window.__lastZoneUpdate[riderId] === undefined) {
+        window.__lastZoneUpdate[riderId] = now;
+
+        // Check if this is truly new or if we have existing zone data (from restoration)
+        const hasExistingData = Object.values(window.__riderPowerZones[riderId]).some(v => v > 0);
+        if (hasExistingData) {
+            console.log(`📊 Restored power zone data for rider ${riderId}:`, window.__riderPowerZones[riderId]);
+        } else {
+            console.log(`⏱️ Starting zone timer for NEW rider ${riderId}`);
         }
+
+        return; // Skip first update to establish baseline
+    }
 
         const timeDelta = (now - window.__lastZoneUpdate[riderId]) / 1000; // seconds
         window.__lastZoneUpdate[riderId] = now;
@@ -1394,7 +1571,7 @@ function autoFitTableText(tbody, options = {}) {
                     <tr class="finished-header-sticky" style="cursor:pointer; font-family:'Overpass',sans-serif;"
                         onclick="event.stopPropagation(); window.toggleGroup('${groupId}');"
                         title="Click to expand/collapse">
-                        <td colspan="7" style="padding:6px; color:#fff; font-weight:bold;">
+                        <td colspan="7" style="padding:6px 10px; color:#fff; font-weight:bold;">
                             ${arrow} Finished - ${finishedRiders.length} rider${finishedRiders.length>1?'s':''}
                         </td>
                     </tr>
@@ -1470,7 +1647,7 @@ function autoFitTableText(tbody, options = {}) {
                     <tr class="group-header-sticky" style="cursor:pointer; font-family:'Overpass',sans-serif;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;"
                         onclick="if(event.ctrlKey) { window.spectateGroupLeader(${groupIdx}); } else { event.stopPropagation(); window.toggleGroup('${groupId}'); }"
                         title="Click to expand/collapse, Ctrl+Click to spectate leader">
-                        <td colspan="7" style="padding:6px; color:#fff; font-weight:bold;">
+                        <td colspan="7" style="padding:6px 10px; color:#fff; font-weight:bold;">
                             ${arrow} ${groupLabel} (${avgSpeed} kph)${groupTimeGap}
                         </td>
                     </tr>
@@ -1511,6 +1688,12 @@ function autoFitTableText(tbody, options = {}) {
     maxFontSize: 15,
     step: 0.5
 });
+
+        // Update sticky header visibility after render
+        manageStickyHeaders();
+
+        // Auto-scroll to user's row if enabled
+        scrollToUserRow();
 
 
         // --- Auto-update group spectate if active ---
