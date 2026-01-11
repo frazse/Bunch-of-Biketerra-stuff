@@ -1,16 +1,14 @@
-
-
-
 // ============================================================================
 // FALLBACK BREAKPOINT - Place at this.riderController.update(x)
-// This will be used when you're alone in the race
+// This handles solo rides AND takes over when others leave
 // ============================================================================
 
 // Initialize globals
 window.hackedRiders = window.hackedRiders || [];
 window.__totalDistMap = window.__totalDistMap || {};
 window.__riderMap = window.__riderMap || new Map();
-window.__usingFallbackBreakpoint = window.__usingFallbackBreakpoint !== undefined ? window.__usingFallbackBreakpoint : true;
+window.__lastPrimaryBreakpoint = window.__lastPrimaryBreakpoint || 0;
+window.__lastFallbackBreakpoint = window.__lastFallbackBreakpoint || 0;
 
 // Expose game manager
 if (this.riderController) {
@@ -19,19 +17,18 @@ if (this.riderController) {
     window.gameManager = this;
 }
 
-// Check if we should use this fallback breakpoint
-// Only use it if the main breakpoint hasn't run recently (no other riders present)
-const now = Date.now();
-const lastMainBreakpointUpdate = window.__riderMap.size > 1 
-    ? Math.max(...Array.from(window.__riderMap.values()).map(r => r._timestamp))
-    : 0;
-const mainBreakpointIsActive = (now - lastMainBreakpointUpdate) < 2000; // Increased to 2 seconds
+// Mark that fallback breakpoint ran
+window.__lastFallbackBreakpoint = Date.now();
 
-// ONLY run fallback if we have 1 or fewer riders (solo mode)
-if (!mainBreakpointIsActive && window.__riderMap.size <= 1) {
-    // Main breakpoint isn't active AND we're alone - use riderController data
-    window.__usingFallbackBreakpoint = true;
-    
+const now = Date.now();
+const timeSincePrimary = now - window.__lastPrimaryBreakpoint;
+
+// Use fallback breakpoint if:
+// 1. Primary hasn't run in 1 second (we're alone), OR
+// 2. We only have 0-1 riders in the map (transition to solo)
+const shouldUseFallback = timeSincePrimary > 1000 || window.__riderMap.size <= 1;
+
+if (shouldUseFallback) {
     const me = this.focalRider || this.ego;
     
     if (me) {
@@ -67,6 +64,9 @@ if (!mainBreakpointIsActive && window.__riderMap.size <= 1) {
         
         // Use native lap tracking from Biketerra
         const lapCount = (me.lapCount || 0) + 1;
+        
+        // Clear map and add only our rider
+        window.__riderMap.clear();
         
         // Store in map with timestamp
         window.__riderMap.set(riderId, {
