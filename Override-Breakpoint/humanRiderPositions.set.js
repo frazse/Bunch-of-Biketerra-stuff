@@ -1,11 +1,14 @@
-// SMART BREAKPOINT - Place at humanRiderPositions.set(o)
-// This will be the primary breakpoint when other riders are present
+// ============================================================================
+// PRIMARY BREAKPOINT - Place at humanRiderPositions.set(o)
+// This handles races with other riders AND transitions to solo mode
+// ============================================================================
 
 // Initialize globals
 window.hackedRiders = window.hackedRiders || [];
 window.__totalDistMap = window.__totalDistMap || {};
 window.__riderMap = window.__riderMap || new Map();
-window.__usingFallbackBreakpoint = false; // Track which breakpoint is active
+window.__lastPrimaryBreakpoint = window.__lastPrimaryBreakpoint || 0;
+window.__lastFallbackBreakpoint = window.__lastFallbackBreakpoint || 0;
 
 // Expose game manager
 if (this.ego || this.focalRider) {
@@ -14,13 +17,14 @@ if (this.ego || this.focalRider) {
     window.gameManager = this.riderController;
 }
 
+// Mark that primary breakpoint ran
+window.__lastPrimaryBreakpoint = Date.now();
+
 // Check if we have other riders (humanRiderPositions context)
 const hasOtherRiders = this.humansList && this.humansList.length > 0;
 
 if (hasOtherRiders) {
-    // We have other riders - use humanRiderPositions data for EVERYONE
-    window.__usingFallbackBreakpoint = false;
-    
+    // We have other riders - process all riders from humansList
     const me = this.focalRider || this.ego;
     const allRiders = [];
     
@@ -28,6 +32,9 @@ if (hasOtherRiders) {
     for (const r of this.humansList) {
         if (r !== me) allRiders.push(r);
     }
+    
+    // Clear the map to start fresh
+    window.__riderMap.clear();
     
     // Process each rider
     for (const rider of allRiders) {
@@ -83,17 +90,12 @@ if (hasOtherRiders) {
         });
     }
     
-    // Clean up stale riders (>3 seconds old)
-    const now = Date.now();
-    for (const [id, rider] of window.__riderMap.entries()) {
-        if (now - rider._timestamp > 3000) {
-            window.__riderMap.delete(id);
-        }
-    }
-    
     // Update the array
     window.hackedRiders = Array.from(window.__riderMap.values());
+} else {
+    // No other riders - we're alone now (or started alone)
+    // Let the fallback breakpoint handle this
+    // But keep existing data until fallback takes over
 }
-// If no other riders, the fallback breakpoint will handle it
 
 false;
