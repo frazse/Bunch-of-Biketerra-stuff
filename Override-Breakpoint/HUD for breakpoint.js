@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra - Riderlist replacement HUD
 // @namespace    http://tampermonkey.net/
-// @version      13.3
-// @description  With time gaps for groups, sticky group headers, per-rider power zone tracking, and persistent race data across refreshes (Fixed rider ID 0 handling)
+// @version      13.5
+// @description  With time gaps for groups, sticky group headers, per-rider power zone tracking, and persistent race data across refreshes (Fixed rider ID 0 handling + stopped riders + individual view sorting)
 // @author       You
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate*
@@ -942,6 +942,14 @@ window.stopGroupSpectate = function() {
             return currentDist;
         }
 
+        // FIXED: Stop interpolating if data is stale (rider has left)
+        // If we haven't received new data in 5 seconds, freeze the position
+        const MAX_STALE_TIME = 5000; // 5 seconds
+        if (timeSinceUpdate > MAX_STALE_TIME) {
+            // Data is stale - rider likely left, freeze position
+            return interp.interpolatedDist;
+        }
+
         // Apply the same interpolation logic to ALL riders (including isMe)
         // This ensures consistent position calculations across all riders
         // Speed is in m/s, time is in ms, so: distance = speed * (time / 1000)
@@ -1667,18 +1675,18 @@ function autoFitTableText(tbody, options = {}) {
                 html += `<tr style="height:4px;"><td colspan="7"></td></tr>`;
             });
         } else {
-            // Individual view - show finished riders first
-            if (finishedRiders.length > 0) {
-                finishedRiders.forEach(r => {
-                    html += renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit, true);
-                });
-                // Add separator
-                html += `<tr style="height:8px; background:rgba(50,205,50,0.3);"><td colspan="7"></td></tr>`;
-            }
+            // Individual view - sort all riders (active + finished) normally by position
+            const allRiders = [...activeRiders, ...finishedRiders];
 
-            // Then active riders
-            activeRiders.forEach(r => {
-                html += renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit);
+            // Sort by lap and distance (finished riders will naturally be at top since they're on lap+1)
+            allRiders.sort((a, b) => {
+                if (b.lap !== a.lap) return b.lap - a.lap;
+                return b.lapDistance - a.lapDistance;
+            });
+
+            allRiders.forEach(r => {
+                const isFinished = window.__finishedRiders[r.riderId] !== undefined;
+                html += renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit, isFinished);
             });
         }
 
