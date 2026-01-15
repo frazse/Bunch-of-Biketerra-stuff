@@ -1,94 +1,115 @@
 // ============================================================================
-// FALLBACK BREAKPOINT - Place at this.riderController.update(x)
-// This handles solo rides AND takes over when others leave
+// FALLBACK / PROCESSING BREAKPOINT – Solo + Group (FIXED)
 // ============================================================================
 
-// Initialize globals
-window.hackedRiders = window.hackedRiders || [];
-window.__totalDistMap = window.__totalDistMap || {};
-window.__riderMap = window.__riderMap || new Map();
-window.__lastPrimaryBreakpoint = window.__lastPrimaryBreakpoint || 0;
-window.__lastFallbackBreakpoint = window.__lastFallbackBreakpoint || 0;
+// --------------------------------------------------------------------
+// Init globals
+// --------------------------------------------------------------------
+window.hackedRiders ??= [];
+window.__totalDistMap ??= {};
+window.__riderMap ??= new Map();
+window.__netHumans ??= new Map();
+window.__lastPrimaryBreakpoint ??= 0;
 
-// Expose game manager
-if (this.riderController) {
-    window.gameManager = this.riderController;
-} else if (this.ego || this.focalRider) {
-    window.gameManager = this;
+// Expose gameManager
+window.gameManager = this.riderController ?? this;
+
+// Timestamp
+const now = Date.now();
+
+// Resolve ego
+const me = this.focalRider || this.ego;
+
+// --------------------------------------------------------------------
+// Name resolver (DECLARE ONCE – breakpoint safe)
+// --------------------------------------------------------------------
+window.__resolveRiderName ??= function (rider, me) {
+    // Network riders
+    if (rider.config?.first_name || rider.config?.last_name) {
+        const n = `${rider.config.first_name || ""} ${rider.config.last_name || ""}`.trim();
+        if (n) return n;
+    }
+
+    // Ego
+    if (rider === me) {
+        const ud = window.gameManager?.ego?.userData || {};
+        const n = `${ud.first_name || ""} ${ud.last_name || ""}`.trim();
+        if (n) return n;
+    }
+
+    return "Unknown Rider";
+};
+
+// --------------------------------------------------------------------
+// Build rider list
+// --------------------------------------------------------------------
+let riders = [];
+
+if (window.__netHumans.size) {
+    riders = [...window.__netHumans.values()];
 }
 
-// Mark that fallback breakpoint ran
-window.__lastFallbackBreakpoint = Date.now();
+if (me && !riders.includes(me)) {
+    riders.unshift(me);
+}
 
-const now = Date.now();
-const timeSincePrimary = now - window.__lastPrimaryBreakpoint;
+if (!riders.length) {
+    false;
+}
 
-// Use fallback breakpoint if:
-// 1. Primary hasn't run in 1 second (we're alone), OR
-// 2. We only have 0-1 riders in the map (transition to solo)
-const shouldUseFallback = timeSincePrimary > 1000 || window.__riderMap.size <= 1;
+// --------------------------------------------------------------------
+// Process riders
+// --------------------------------------------------------------------
+for (const rider of riders) {
+    const riderId = rider.athleteId || rider.id;
+    const dist = rider.currentPathDistance || 0;
+    const watts = rider.power || 0;
+    const c = rider.config || {};
 
-if (shouldUseFallback) {
-    const me = this.focalRider || this.ego;
-    
-    if (me) {
-        const c = me.config || {};
-        const f = c.first_name || "";
-        const l = c.last_name || "";
-        let fullName = (f + " " + l).trim();
-        
-        if (!fullName) {
-            const ef = window.gameManager?.ego?.userData?.first_name || "";
-            const el = window.gameManager?.ego?.userData?.last_name || "";
-            fullName = (ef + " " + el).trim() || "Unknown Rider";
-        }
-        
-        const watts = me.power || 0;
-        const weightInGrams = c.weight || 103000;
-        const weightInKg = weightInGrams / 1000;
-        const wkg = weightInKg > 0 ? watts / weightInKg : 0;
-        
-        const design = me.entity?.design || {};
-        const dist = me.currentPathDistance || 0;
-        const riderId = me.athleteId || me.id;
-        
-        // Total distance tracking
-        if (!window.__totalDistMap[riderId]) {
-            window.__totalDistMap[riderId] = { total: 0, lastDist: dist };
-        }
-        let delta = dist - window.__totalDistMap[riderId].lastDist;
-        if (delta >= 0) {
-            window.__totalDistMap[riderId].total += delta;
-        }
-        window.__totalDistMap[riderId].lastDist = dist;
-        
-        // Use native lap tracking from Biketerra
-        const lapCount = (me.lapCount || 0) + 1;
-        
-        // Clear map and add only our rider
-        window.__riderMap.clear();
-        
-        // Store in map with timestamp
-        window.__riderMap.set(riderId, {
-            name: fullName,
-            dist: dist,
-            lap: lapCount,
-            lapDistance: dist >= 0 ? dist : 0,
-            totaldist: window.__totalDistMap[riderId].total,
-            wkg: wkg,
-            speed: me.speed,
-            power: watts,
-            isMe: true,
-            riderId: riderId,
-            helmet: design.helmet_color,
-            skin: design.skin_color,
-            pathID: me.currentPath?.id,
-            _timestamp: Date.now()
-        });
-        
-        // Update the array
-        window.hackedRiders = Array.from(window.__riderMap.values());
+    const weightKg = (c.weight || 103000) / 1000;
+    const wkg = weightKg > 0 ? watts / weightKg : 0;
+
+    // Distance tracking
+    window.__totalDistMap[riderId] ??= { total: 0, lastDist: dist };
+    const t = window.__totalDistMap[riderId];
+
+    const delta = dist - t.lastDist;
+    if (delta >= 0) t.total += delta;
+    t.lastDist = dist;
+
+    const lap = (rider.lapCount || 0) + 1;
+
+    window.__riderMap.set(riderId, {
+        name: window.__resolveRiderName(rider, me),
+        dist,
+        lap,
+        lapDistance: Math.max(0, dist),
+        totaldist: t.total,
+        wkg,
+        speed: rider.speed,
+        power: watts,
+        isMe: rider === me,
+        riderId,
+        helmet: rider.entity?.design?.helmet_color,
+        skin: rider.entity?.design?.skin_color,
+        pathID: rider.currentPath?.id,
+        _timestamp: now
+    });
+}
+
+// --------------------------------------------------------------------
+// Cleanup stale riders
+// --------------------------------------------------------------------
+for (const [id, r] of window.__riderMap.entries()) {
+    if (now - r._timestamp > 3000) {
+        window.__riderMap.delete(id);
+        window.__netHumans.delete(id);
     }
 }
+
+// --------------------------------------------------------------------
+// Publish
+// --------------------------------------------------------------------
+window.hackedRiders = [...window.__riderMap.values()];
 
 false;
