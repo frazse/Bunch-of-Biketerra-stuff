@@ -1,75 +1,96 @@
 // ============================================================================
-// FALLBACK / PROCESSING BREAKPOINT – Solo + Group (FIXED)
+// FALLBACK / PROCESSING BREAKPOINT – SOLO + GROUP (NO GHOST RIDERS, ADD NETWORK RIDERS)
 // ============================================================================
 
-// --------------------------------------------------------------------
 // Init globals
-// --------------------------------------------------------------------
 window.hackedRiders ??= [];
 window.__totalDistMap ??= {};
 window.__riderMap ??= new Map();
 window.__netHumans ??= new Map();
-window.__lastPrimaryBreakpoint ??= 0;
 
 // Expose gameManager
 window.gameManager = this.riderController ?? this;
 
 // Timestamp
 const now = Date.now();
-
-// Resolve ego
 const me = this.focalRider || this.ego;
 
-// --------------------------------------------------------------------
-// Name resolver (DECLARE ONCE – breakpoint safe)
-// --------------------------------------------------------------------
+// Name resolver
 window.__resolveRiderName ??= function (rider, me) {
-    // Network riders
     if (rider.config?.first_name || rider.config?.last_name) {
         const n = `${rider.config.first_name || ""} ${rider.config.last_name || ""}`.trim();
         if (n) return n;
     }
-
-    // Ego
     if (rider === me) {
         const ud = window.gameManager?.ego?.userData || {};
         const n = `${ud.first_name || ""} ${ud.last_name || ""}`.trim();
         if (n) return n;
     }
-
     return "Unknown Rider";
 };
 
 // --------------------------------------------------------------------
-// Build rider list
+// 1️⃣ Build current riders from humansList + network humans
 // --------------------------------------------------------------------
-let riders = [];
+const ridersMap = new Map();
 
-if (window.__netHumans.size) {
-    riders = [...window.__netHumans.values()];
+// Add humansList if present
+if (this.humansList?.length) {
+    for (const r of this.humansList) {
+        const id = r.athleteId || r.id;
+        ridersMap.set(id, r);
+    }
 }
 
-if (me && !riders.includes(me)) {
-    riders.unshift(me);
+// Add network riders from gameManager.humans
+if (window.gameManager?.humans) {
+    for (const r of Object.values(window.gameManager.humans)) {
+        const id = r.athleteId || r.id;
+        ridersMap.set(id, r);
+    }
 }
 
-if (!riders.length) {
-    false;
+// Always add ego
+if (me) {
+    const id = me.athleteId || me.id;
+    ridersMap.set(id, me);
+}
+
+// Build set of valid IDs
+const validIds = new Set(ridersMap.keys());
+
+// --------------------------------------------------------------------
+// 2️⃣ Remove stale riders from __riderMap and __netHumans
+// --------------------------------------------------------------------
+for (const id of window.__riderMap.keys()) {
+    if (!validIds.has(id)) {
+        window.__riderMap.delete(id);
+        window.__netHumans.delete(id);
+    }
 }
 
 // --------------------------------------------------------------------
-// Process riders
+// 3️⃣ Update __netHumans with current network riders (exclude ego)
 // --------------------------------------------------------------------
-for (const rider of riders) {
+window.__netHumans.clear();
+for (const r of ridersMap.values()) {
+    if (r !== me) {
+        const id = r.athleteId || r.id;
+        window.__netHumans.set(id, r);
+    }
+}
+
+// --------------------------------------------------------------------
+// 4️⃣ Process each rider
+// --------------------------------------------------------------------
+for (const rider of ridersMap.values()) {
     const riderId = rider.athleteId || rider.id;
     const dist = rider.currentPathDistance || 0;
     const watts = rider.power || 0;
     const c = rider.config || {};
-
     const weightKg = (c.weight || 103000) / 1000;
     const wkg = weightKg > 0 ? watts / weightKg : 0;
 
-    // Distance tracking
     window.__totalDistMap[riderId] ??= { total: 0, lastDist: dist };
     const t = window.__totalDistMap[riderId];
 
@@ -98,17 +119,18 @@ for (const rider of riders) {
 }
 
 // --------------------------------------------------------------------
-// Cleanup stale riders
+// 5️⃣ Cleanup stale riders older than 3s (backup)
 // --------------------------------------------------------------------
 for (const [id, r] of window.__riderMap.entries()) {
-    if (now - r._timestamp > 3000) {
+    const isEgo = id === (me?.athleteId || me?.id);
+    if (!isEgo && now - r._timestamp > 3000) {
         window.__riderMap.delete(id);
         window.__netHumans.delete(id);
     }
 }
 
 // --------------------------------------------------------------------
-// Publish
+// 6️⃣ Publish hackedRiders
 // --------------------------------------------------------------------
 window.hackedRiders = [...window.__riderMap.values()];
 
