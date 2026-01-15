@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra - Riderlist replacement HUD
 // @namespace    http://tampermonkey.net/
-// @version      13.9
-// @description  With time gaps for groups, sticky group headers, per-rider power zone tracking, and persistent race data across refreshes (Fixed rider ID 0 handling + stopped riders + individual view sorting + online count)
+// @version      14.1
+// @description  With time gaps for groups, sticky group headers, per-rider power zone tracking, and persistent race data across refreshes (Fixed rider ID 0 handling + stopped riders + individual view sorting + online count + finished riders persist)
 // @author       You
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate*
@@ -1322,6 +1322,7 @@ function autoFitTableText(tbody, options = {}) {
         let riders = window.hackedRiders ? [...window.hackedRiders] : [];
 
         // Add back any finished riders that are no longer in hackedRiders
+        // Finished riders should always be shown, even if they've left the event
         Object.keys(window.__finishedRiders).forEach(finishedId => {
             if (!riders.find(r => r.riderId == finishedId)) {
                 const storedData = window.__finishedRiders[finishedId].riderData;
@@ -1682,7 +1683,12 @@ function autoFitTableText(tbody, options = {}) {
             });
         } else {
             // Individual view - sort all riders (active + finished) normally by position
-            const allRiders = [...activeRiders, ...finishedRiders];
+            // BUT only include finished riders who are still online
+            const onlineFinishedRiders = finishedRiders.filter(fr =>
+                window.hackedRiders && window.hackedRiders.some(hr => hr.riderId === fr.riderId)
+            );
+
+            const allRiders = [...activeRiders, ...onlineFinishedRiders];
 
             // Sort by lap and distance (finished riders will naturally be at top since they're on lap+1)
             allRiders.sort((a, b) => {
