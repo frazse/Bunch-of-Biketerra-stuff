@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra Elevation Graph Multi Rider
 // @namespace    http://tampermonkey.net/
-// @version      2.4
-// @description  Two-color rider lines with group highlighting and counter (fixed direction grouping)
+// @version      2.5
+// @description  Two-color rider lines with group highlighting and counter (fixed direction grouping + stale rider removal)
 // @author       Josef
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate/*
@@ -14,7 +14,7 @@
 
 (function () {
     'use strict';
-    console.log("[LeaderOverlay v2.4] Script started with fixed direction grouping.");
+    console.log("[LeaderOverlay v2.5] Script started with fixed direction grouping and stale rider removal.");
 
     // ============================
     // CONFIGURATION
@@ -24,6 +24,7 @@
     const GROUP_RECT_BORDER = "rgba(255, 255, 255, 1)"; // Yellow border
     const GROUP_CIRCLE_RADIUS_RATIO = 0.03; // Circle radius as ratio of viewHeight
     const GROUP_CIRCLE_Y_OFFSET_RATIO = 0.05; // How far above the top (as ratio of viewHeight)
+    const MAX_STALE_TIME = 5000; // Remove markers if no updates in 5 seconds
 
     const checkInterval = 500;
     let autoDetect = true;
@@ -449,7 +450,15 @@ function updateElevCursorColors() {
                 entry.speed = r.speed;
             }
 
-            // 2. Physics Prediction
+            // 2. Check for stale data (rider has left)
+            if ((now - entry.lastUpdateTime) > MAX_STALE_TIME) {
+                // Data is stale - rider likely left, hide their lines and skip
+                entry.lineTop.style.display = 'none';
+                entry.lineBottom.style.display = 'none';
+                return; // Skip this rider
+            }
+
+            // 3. Physics Prediction
             const dt = (now - entry.lastUpdateTime) / 1000;
 
             // Predict the new absolute position (0.0 to 1.0)
@@ -539,7 +548,7 @@ function updateElevCursorColors() {
 
             const { predictedPos, entry, helmetColor, skinColor } = pr;
 
-            // 3. Visibility and Drawing
+            // 4. Visibility and Drawing
             const positionRelativeToViewStart = predictedPos - minX;
             const normalizedRelativePosition = positionRelativeToViewStart / viewWidth;
 
