@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra - Riderlist replacement HUD
 // @namespace    http://tampermonkey.net/
-// @version      13.5
-// @description  With time gaps for groups, sticky group headers, per-rider power zone tracking, and persistent race data across refreshes (Fixed rider ID 0 handling + stopped riders + individual view sorting)
+// @version      13.9
+// @description  With time gaps for groups, sticky group headers, per-rider power zone tracking, and persistent race data across refreshes (Fixed rider ID 0 handling + stopped riders + individual view sorting + online count)
 // @author       You
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate*
@@ -1575,12 +1575,18 @@ function autoFitTableText(tbody, options = {}) {
                 const isExpanded = !expandedGroups.has(groupId + '-collapsed');
                 const arrow = isExpanded ? '▲' : '▼';
 
+                // Count how many finished riders are still in window.hackedRiders (actively connected)
+                // Don't use 'riders' array since that includes stored finished riders
+                const onlineCount = finishedRiders.filter(fr =>
+                    window.hackedRiders && window.hackedRiders.some(hr => hr.riderId === fr.riderId)
+                ).length;
+
                 html += `
                     <tr class="finished-header-sticky" style="cursor:pointer; font-family:'Overpass',sans-serif;"
                         onclick="event.stopPropagation(); window.toggleGroup('${groupId}');"
                         title="Click to expand/collapse">
                         <td colspan="7" style="padding:6px 10px; color:#fff; font-weight:bold;">
-                            ${arrow} Finished - ${finishedRiders.length} rider${finishedRiders.length>1?'s':''}
+                            ${arrow} Finished - ${finishedRiders.length} rider${finishedRiders.length>1?'s':''} (${onlineCount} online)
                         </td>
                     </tr>
                 `;
