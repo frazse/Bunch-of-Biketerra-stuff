@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Biketerra - Riderlist replacement HUD
 // @namespace    http://tampermonkey.net/
-// @version      14.1
-// @description  With time gaps for groups, sticky group headers, per-rider power zone tracking, and persistent race data across refreshes (Fixed rider ID 0 handling + stopped riders + individual view sorting + online count + finished riders persist)
+// @version      14.8
+// @description  With time gaps for groups, sticky group headers, per-rider power zone tracking, and persistent race data across refreshes (Performance optimized - prevents interval accumulation, fixed TTT team detection)
 // @author       You
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate*
@@ -14,6 +14,23 @@
 (function() {
     'use strict';
 
+    // ============================================================================
+    // CRITICAL: Clear any existing intervals from previous script runs
+    // ============================================================================
+    if (window.__biketerraIntervals) {
+        console.log(`🧹 Clearing ${window.__biketerraIntervals.length} existing intervals from previous script run`);
+        window.__biketerraIntervals.forEach(id => clearInterval(id));
+    }
+    window.__biketerraIntervals = [];
+
+    // Helper function to track intervals
+    function addTrackedInterval(fn, delay) {
+        const id = setInterval(fn, delay);
+        window.__biketerraIntervals.push(id);
+        console.log(`✅ Created tracked interval #${window.__biketerraIntervals.length} (delay: ${delay}ms)`);
+        return id;
+    }
+
     // Store athleteId => teamName
     window.__tttTeamMap = {};
     window.__tttDataLoaded = false;
@@ -24,7 +41,6 @@
 
     // Store finished riders data
     window.__finishedRiders = {};
-    window.__lastLapCounts = {}; // Track lap counts to detect lap completions
     window.__lastLapCounts = window.__lastLapCounts || {};
 
     // --- Power Zone Time Tracking (per rider) ---
@@ -104,6 +120,7 @@ function clearRaceData() {
     window.__lastZoneUpdate = {};
     window.__finishedRiders = {};
     window.__lastLapCounts = {};
+    window.__riderInterpolation = {}; // Clear interpolation data
     localStorage.removeItem(window.__raceDataStorageKey);
 }
 
@@ -132,8 +149,7 @@ function detectRouteChange() {
 
     // If we don't have a valid route ID, don't proceed
     if (!routeId) {
-        console.log("⏳ Waiting for route ID... (current URL:", window.location.href, ")");
-        return; // Wait until we have valid route data
+        return;
     }
 
     if (routeId !== window.__currentRouteId) {
@@ -148,14 +164,104 @@ function detectRouteChange() {
         loadRaceData();
     }
 }
+
+// ============================================================================
+// TTT TEAM DETECTION - Fetch from event page DOM
+// ============================================================================
+
+// Fetch and extract TTT teams from the event page JSON data
+async function fetchTTTTeamsFromEventPage(eventId) {
+    try {
+        console.log(`🔍 Fetching TTT team data from /events/${eventId}`);
+
+        const response = await fetch(`/events/${eventId}`);
+        const html = await response.text();
+
+        // Find the team_groups section in the HTML
+        const teamGroupsStart = html.indexOf('team_groups:');
+        if (teamGroupsStart === -1) {
+            console.log("No team_groups found in event page");
+            return false;
+        }
+
+        // Extract a larger chunk to ensure we get all team data
+        const chunk = html.substring(teamGroupsStart, teamGroupsStart + 50000);
+
+        // Pattern that handles nested objects by using [\s\S] instead of [^}]
+        // This allows the pattern to skip over nested braces in the members array
+        const teamPattern = /title:"([^"]+)"[\s\S]*?member_ids:\[([^\]]+)\]/g;
+
+        let match;
+        let totalMembers = 0;
+        let teamCount = 0;
+        const foundTeams = new Set(); // Prevent duplicates
+
+        while ((match = teamPattern.exec(chunk)) !== null) {
+            const teamName = match[1];
+            const memberIdsStr = match[2];
+
+            // Skip if we've already processed this team
+            if (foundTeams.has(teamName)) {
+                continue;
+            }
+
+            // Parse member IDs (they're just numbers separated by commas)
+            const memberIds = memberIdsStr.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+
+            if (memberIds.length > 0) {
+                memberIds.forEach(memberId => {
+                    window.__tttTeamMap[String(memberId)] = teamName;
+                    totalMembers++;
+                });
+
+                foundTeams.add(teamName);
+                teamCount++;
+                console.log(`✅ Registered team "${teamName}" with ${memberIds.length} members:`, memberIds);
+            }
+        }
+
+        if (totalMembers > 0) {
+            window.__tttDataLoaded = true;
+            console.log(`🏁 TTT teams loaded: ${totalMembers} riders across ${teamCount} teams`);
+            console.log("🏁 Team mappings:", window.__tttTeamMap);
+            return true;
+        }
+
+        console.log("No valid teams found");
+        console.log("Chunk preview:", chunk.substring(0, 500));
+        return false;
+    } catch (error) {
+        console.error("Failed to fetch TTT teams from event page:", error);
+        return false;
+    }
+}
+
+// Detect if we're on a spectate page and extract event ID
+function detectAndLoadTTTTeams() {
+    const spectateMatch = window.location.pathname.match(/^\/spectate\/(\d+)/);
+
+    if (spectateMatch) {
+        const eventId = spectateMatch[1];
+        console.log(`📍 Spectating event ${eventId}`);
+        fetchTTTTeamsFromEventPage(eventId);
+    }
+}
+
+// Run TTT team detection on page load
+detectAndLoadTTTTeams();
+
+// ============================================================================
+// TRACKED INTERVALS - Using addTrackedInterval instead of setInterval
+// ============================================================================
+
 // Check for route changes periodically
-setInterval(detectRouteChange, 2000);
+addTrackedInterval(detectRouteChange, 2000);
 
 // Initial route detection
 detectRouteChange();
 
 // Save data periodically (every 10 seconds)
-setInterval(() => {
+addTrackedInterval(() => {
     if (window.__currentRouteId) {
         saveRaceData();
     }
@@ -297,77 +403,6 @@ function queueRidersForFtp(riders) {
         }
     });
 }
-
-    const originalFetch = window.fetch;
-    window.fetch = async function(input, init) {
-        const response = await originalFetch(input, init);
-
-        try {
-            const url = input?.url || input?.toString();
-            if (url.includes('__data.json')) {
-                const cloned = response.clone();
-                const dataText = await cloned.text();
-
-                // Parse the main JSON response
-                let json;
-                try {
-                    json = JSON.parse(dataText);
-                } catch (e) {
-                    console.error("Failed to parse __data.json:", e);
-                    return response;
-                }
-
-                // Look inside nodes if present
-                const nodesArr = json.nodes || [];
-                let found = false;
-
-                nodesArr.forEach(node => {
-                    const arr = node.data || node; // sometimes node itself is array
-
-                    arr.forEach((item, idx) => {
-                        if (item === "ttt") {
-                            // Grab next few items to find the teams JSON
-                            const potentialTeams = arr.slice(idx + 1, idx + 5);
-                            const teamsString = potentialTeams.find(s => {
-                                try {
-                                    const o = JSON.parse(s);
-                                    return typeof o === 'object' && Object.values(o).some(t => t?.name && Array.isArray(t?.members));
-                                } catch (e) {
-                                    return false;
-                                }
-                            });
-
-                            if (!teamsString) return;
-
-                            try {
-                                const teamsObj = JSON.parse(teamsString);
-                                Object.values(teamsObj).forEach(team => {
-                                    if (Array.isArray(team.members)) {
-                                        team.members.forEach(id => {
-                                            window.__tttTeamMap[id.toString()] = team.name;
-                                        });
-                                    }
-                                });
-                                window.__tttDataLoaded = true;
-                                console.log("🏁 TTT teams loaded:", window.__tttTeamMap);
-                                console.log("🏁 TTT map keys (first 10):", Object.keys(window.__tttTeamMap).slice(0, 10));
-                                console.log("🏁 TTT teams data:", teamsObj);
-                                found = true;
-                            } catch (err) {
-                                console.error("TTT JSON parse error:", err, teamsString);
-                            }
-                        }
-                    });
-                });
-
-                if (!found) console.log("No TTT teams found in __data.json nodes");
-            }
-        } catch (e) {
-            console.error("Error intercepting __data.json:", e);
-        }
-
-        return response;
-    };
 
 function getTotalLaps() {
     const el = document.querySelector('.panel-laps');
@@ -544,25 +579,20 @@ window.stopGroupSpectate = function() {
     }
     hideOriginalRiderList();
 
-    waitFor(".rider-list-footer").then(el => {
-        if(el) {
-            el.style.paddingTop = '0rem';
-            el.style.paddingRight = '.4rem';
-        }
-    }).catch(() => {});
-        waitFor(".view-toggle").then(el => {
-        if(el) {
-            el.style.paddingTop = '0rem';
-            el.style.paddingRight = '.4rem';
-        }
+waitFor(".view-toggle").then(container => {
+    if(container) {
+        container.style.paddingTop = '0rem';
+        container.style.paddingRight = '.4rem';
 
-    }).catch(() => {});
-
-    waitFor(".view-toggle button").then(el => {
-        if(el && !el.classList.contains('latency')) {
-            el.style.display = 'none';
-        }
-    }).catch(() => {});
+        // FIXED: Hide all buttons except the latency button
+        const buttons = container.querySelectorAll('button');
+        buttons.forEach(btn => {
+            if(!btn.classList.contains('latency')) {
+                btn.style.display = 'none';
+            }
+        });
+    }
+}).catch(() => {});
 
     // --- Add custom scrollbar styling ---
     const style = document.createElement('style');
@@ -773,7 +803,7 @@ window.stopGroupSpectate = function() {
     const viewToggle = document.getElementById('view-toggle');
 
     // --- View state ---
-    let isGroupView = false;
+    let isGroupView = true;
     const GROUP_DISTANCE = 25; // meters
     const expandedGroups = new Set(); // Track which groups are collapsed
     let activeGroupSpectate = null; // Track which group index is being spectated
@@ -804,8 +834,8 @@ window.stopGroupSpectate = function() {
             }
         });
 
-        // Re-enable auto-scroll after timeout
-        setInterval(() => {
+        // Re-enable auto-scroll after timeout - USING TRACKED INTERVAL
+        addTrackedInterval(() => {
             if (!autoScrollEnabled && Date.now() - lastManualScroll > MANUAL_SCROLL_TIMEOUT) {
                 autoScrollEnabled = true;
             }
@@ -843,9 +873,17 @@ window.stopGroupSpectate = function() {
         }, 500);
     }
 
-    // Attach scroll listener for sticky headers
+    // Attach scroll listener for sticky headers with throttling
     if (scrollContainer) {
-        scrollContainer.addEventListener('scroll', manageStickyHeaders);
+        let scrollThrottle;
+        scrollContainer.addEventListener('scroll', () => {
+            if (!scrollThrottle) {
+                scrollThrottle = setTimeout(() => {
+                    manageStickyHeaders();
+                    scrollThrottle = null;
+                }, 100); // Throttle to max 10 times per second
+            }
+        });
     }
 
     // FIXED: Improved toggle function with immediate DOM manipulation
@@ -1276,6 +1314,7 @@ if (window.__lastZoneUpdate[riderId] === undefined) {
             }
         });
     }
+
 function autoFitTableText(tbody, options = {}) {
     const {
         minFontSize = 9,
@@ -1312,7 +1351,12 @@ function autoFitTableText(tbody, options = {}) {
     });
 }
 
-    setInterval(() => {
+    // ============================================================================
+    // MAIN RENDER LOOP - USING TRACKED INTERVAL
+    // ============================================================================
+    addTrackedInterval(() => {
+        const perfStart = performance.now();
+
         if (!window.hackedRiders && Object.keys(window.__finishedRiders).length === 0) {
             statusLight.innerText = "●";
             statusLight.style.color = "orange";
@@ -1481,13 +1525,6 @@ function autoFitTableText(tbody, options = {}) {
                             teamGroups[teamName] = [];
                         }
                         teamGroups[teamName].push(r);
-                        console.log(`✅ Rider ${r.name} (ID: ${id}) assigned to TTT team: ${teamName}`);
-                    } else {
-                        // Debug: log riders that don't match
-                        const mapKeys = Object.keys(window.__tttTeamMap);
-                        if (mapKeys.length > 0) {
-                            console.log(`❌ Rider ${r.name} (ID: ${id}, type: ${typeof id}) not found in TTT map. Map keys sample:`, mapKeys.slice(0, 3));
-                        }
                     }
                 });
 
@@ -1495,7 +1532,6 @@ function autoFitTableText(tbody, options = {}) {
                 Object.entries(teamGroups).forEach(([teamName, teamRiders]) => {
                     if (teamRiders.length > 0) {
                         groups.push(teamRiders);
-                        console.log(`🏁 Created TTT group: ${teamName} with ${teamRiders.length} riders`);
                         // Remove these riders from ungrouped list
                         teamRiders.forEach(tr => {
                             const idx = ungroupedRiders.findIndex(ur => ur.riderId === tr.riderId);
@@ -1531,7 +1567,6 @@ function autoFitTableText(tbody, options = {}) {
                 // (This handles edge cases where a rider might not be in the TTT data)
                 ungroupedRiders.forEach(r => {
                     groups.push([r]);
-                    console.log(`⚠️ Ungrouped rider in TTT race: ${r.name} (ID: ${r.riderId})`);
                 });
             }
 
@@ -1702,19 +1737,32 @@ function autoFitTableText(tbody, options = {}) {
             });
         }
 
-        tbody.innerHTML = html;
-        autoFitTableText(tbody, {
-    minFontSize: 9,
-    maxFontSize: 15,
-    step: 0.5
-});
+        // PERFORMANCE: Only update DOM if HTML actually changed
+        if (!window.__lastTableHTML || window.__lastTableHTML !== html) {
+            tbody.innerHTML = html;
+            window.__lastTableHTML = html;
+        }
+
+        // PERFORMANCE FIX: autoFitTableText disabled - was causing 3-second freezes
+        // The table uses table-layout:fixed with set column widths, so auto-fitting isn't necessary
+        // If text overflow becomes an issue, re-enable this but throttle it heavily (once per 30s)
+        /*
+        const now = Date.now();
+        if (!window.__lastAutoFit || now - window.__lastAutoFit > 30000) {
+            autoFitTableText(tbody, {
+                minFontSize: 9,
+                maxFontSize: 15,
+                step: 0.5
+            });
+            window.__lastAutoFit = now;
+        }
+        */
 
         // Update sticky header visibility after render
         manageStickyHeaders();
 
         // Auto-scroll to user's row if enabled
         scrollToUserRow();
-
 
         // --- Auto-update group spectate if active ---
         if (window.activeGroupSpectate !== null) {
@@ -1791,7 +1839,19 @@ function autoFitTableText(tbody, options = {}) {
             }
         }
 
-    }, 500);
-    setInterval(processFtpQueue, 1000);
+        const perfEnd = performance.now();
+        const renderTime = perfEnd - perfStart;
+
+        // Log if render took longer than 100ms
+        if (renderTime > 100) {
+            console.warn(`⚠️ Slow render: ${renderTime.toFixed(2)}ms (${riders.length} riders)`);
+        }
+
+    }, 1000); // Reduced from 500ms - smoother performance
+
+    // ============================================================================
+    // FTP QUEUE PROCESSOR - USING TRACKED INTERVAL
+    // ============================================================================
+    addTrackedInterval(processFtpQueue, 1000);
 
 })();
