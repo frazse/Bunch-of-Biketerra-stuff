@@ -71,7 +71,7 @@
       background: rgba(0,0,0,0.85);
       border-radius: 12px;
       font-family: monospace;
-      z-index: 9999;
+      z-index: 1;
       display: flex;
       flex-direction: column;
       border: 1px solid rgba(255,255,255,0.1);
@@ -165,13 +165,13 @@
 
     // --- Route Logic ---
     if (routePts && routePts.length > 1) {
-      const STEP = 1.0;
+      const STEP = 0.5;
       const ROAD_WIDTH = 3.5;
       for (let i = 0; i < routePts.length - 1; i++) {
         const p1 = routePts[i], p2 = routePts[i + 1];
         const dx = p2.rx - p1.rx, dz = p2.rz - p1.rz;
         const dist = Math.sqrt(dx * dx + dz * dz);
-        if (dist === 0 || dist > 100) continue;
+if (dist < 0.001) continue;
 
         // Vector logic for curbs
         const nx = (-dz / dist) * ROAD_WIDTH;
