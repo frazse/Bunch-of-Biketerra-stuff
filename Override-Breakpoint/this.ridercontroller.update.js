@@ -1,5 +1,5 @@
 // ============================================================================
-// BIKETERRA DATA EXTRACTOR - FULL SYNC (IDENTITY + STATS + DESIGN)
+// BIKETERRA DATA EXTRACTOR - ZERO-SAFE PATHID SYNC
 // ============================================================================
 
 try {
@@ -13,7 +13,7 @@ try {
     const ego = gm?.ego || this.ego;
     const now = Date.now();
 
-    // 1️⃣ GRAB ALL POTENTIAL RIDERS (Collection-Safe)
+    // 1️⃣ GRAB ALL POTENTIAL RIDERS
     const rawHumans = gm?.humanManager?.humans || {};
     const ridersToProcess = [];
 
@@ -33,21 +33,23 @@ try {
             const state = rider.entity?.state || {};
             const isMe = entry.isMe || (rider === ego);
             
-            // Identity & Config Paths
+            // Identity
             const rId = isMe ? (ego.userData?.id || entry.id) : (rider.athleteId || entry.id);
             const ud = isMe ? (ego.userData || {}) : (rider.config || {});
-            
-            // Design / Customization (Restored)
             const design = rider.entity?.design || {};
             
-            // Name Resolution
             const rName = `${ud.first_name || ""} ${ud.last_name || ""}`.trim() || (isMe ? "Me" : `Rider ${rId}`);
 
-            // Stats & Wkg
+            // Stats
             const dist = state.currentPathDistance ?? rider.currentPathDistance ?? 0;
             const watts = state.power ?? rider.power ?? 0;
             const weightGrams = isMe ? (ego.userData?.weight) : (rider.config?.weight);
             const wkg = weightGrams > 0 ? (watts / (weightGrams / 1000)) : (state.smoothWkg ?? 0);
+
+            // --- ZERO-SAFE PATHID LOOKUP ---
+            // Using ?? (Nullish Coalescing) instead of || (Logical OR)
+            // This ensures that 0 is treated as a valid value and not skipped.
+            const pId = state.currentPath?.id ?? rider.currentPath?.id ?? null;
 
             // Distance Tracking
             window.__totalDistMap[rId] ??= { total: 0, lastDist: dist };
@@ -56,7 +58,7 @@ try {
             if (delta >= 0 && delta < 500) t.total += delta;
             t.lastDist = dist;
 
-            // 3️⃣ UPDATE DATA MAP (Including Helmet/Skin)
+            // 3️⃣ UPDATE DATA MAP
             window.__riderMap.set(rId, {
                 name: rName,
                 dist,
@@ -71,10 +73,9 @@ try {
                 heartRate: state.heartRate || 0,
                 isMe: isMe,
                 riderId: rId,
-                // Restored Customization Fields
                 helmet: design.helmet_color,
                 skin: design.skin_color,
-                pathID: state.currentPath?.id || rider.currentPath?.id,
+                pathID: pId, // Now correctly returns 0 or 1
                 _timestamp: now
             });
         } catch (e) { continue; }
