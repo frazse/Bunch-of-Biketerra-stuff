@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Biketerra Elevation Graph Multi Rider
 // @namespace    http://tampermonkey.net/
-// @version      2.6
+// @version      2.7
 // @description  Two-color rider lines with group highlighting and counter (fixed direction grouping + presence-based rider removal)
 // @author       Josef
 // @match        https://biketerra.com/ride*
@@ -199,20 +199,20 @@ function updateElevCursorColors() {
     // READ EVERY RIDER POSITION
     // ============================
     function getRidersPositions() {
-        if (!window.hackedRiders || !window.gameManager?.humans) return [];
+        if (!window.hackedRiders || !window.gameManager?.humanManager.humans) return [];
 
         const gm = window.gameManager;
-        const gmHumans = gm.humans;
+        const gmHumans = gm.humanManager.humans;
         let subjectPathId = 0;
 
         // 1. Determine Subject Path ID (0 or 1)
         if (gm.ego) {
-            subjectPathId = gm.ego.currentPath?.id;
-        } else if (gm.focalRider) {
-            const fId = gm.focalRider.athleteId || gm.focalRider.id;
+            subjectPathId = gm.ego.entity.state.currentPath?.id;
+        } else if (gm.focalRider.entity.state) {
+            const fId = gm.focalRider.entity.state.athleteId || gm.focalRider.entity.state.id;
             const focalHuman = gmHumans[fId] || Object.values(gmHumans).find(h => (h.athleteId||h.id) == fId);
             if (focalHuman) {
-                subjectPathId = focalHuman.currentPath?.id;
+                subjectPathId = focalHuman.entity.state.currentPath?.id;
             }
         }
 
@@ -238,9 +238,9 @@ function updateElevCursorColors() {
 
             let riderPathMeters = fallbackPathMeters;
             let riderPathId = 0;
-            if (targetHuman?.currentPath) {
-                riderPathMeters = targetHuman.currentPath.distance || fallbackPathMeters;
-                riderPathId = targetHuman.currentPath.id;
+            if (targetHuman?.entity.state.currentPath) {
+                riderPathMeters = targetHuman.entity.state.currentPath.distance || fallbackPathMeters;
+                riderPathId = targetHuman.entity.state.currentPath.id;
             }
             if (riderPathMeters === 0) return;
 
@@ -294,13 +294,13 @@ function updateElevCursorColors() {
         if (!autoDetect) return;
         const gm = window.gameManager;
 
-        let currentPath = gm?.ego?.currentPath;
+        let currentPath = gm?.ego?.entity.state.currentPath;
 
         if (!currentPath && gm?.focalRider) {
-             const fId = gm.focalRider.athleteId || gm.focalRider.id;
-             const humans = gm.humans || {};
+             const fId = gm.focalRider.entity.state.athleteId || gm.focalRider.entity.state.id;
+             const humans = gm.humanManager.humans || {};
              const focalHuman = humans[fId] || Object.values(humans).find(h => (h.athleteId||h.id) == fId);
-             if (focalHuman) currentPath = focalHuman.currentPath;
+             if (focalHuman) currentPath = focalHuman.entity.state.currentPath;
         }
 
         const meters = currentPath?.distance;
