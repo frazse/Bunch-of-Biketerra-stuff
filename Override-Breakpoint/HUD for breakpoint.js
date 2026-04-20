@@ -1,14 +1,14 @@
 // ==UserScript==
-// @name         Biketerra - Riderlist replacement HUD
-// @namespace    http://tampermonkey.net/
-// @version      14.9
-// @description  Updated to prioritize Focal Rider over Ego for HUD metrics and highlighting
-// @author       You
-// @match        https://biketerra.com/ride*
-// @match        https://biketerra.com/spectate*
-// @exclude      https://biketerra.com/dashboard
-// @icon         https://www.google.com/s2/favicons?sz=64&domain=biketerra.com
-// @grant        none
+// @name          Biketerra - Riderlist replacement HUD (v15.1 Lap Fix)
+// @namespace     http://tampermonkey.net/
+// @version       15.1
+// @description   Base HUD with Focal Priority and fix for cumulative lap distance logic.
+// @author        You
+// @match         https://biketerra.com/ride*
+// @match         https://biketerra.com/spectate*
+// @exclude       https://biketerra.com/dashboard
+// @icon          https://www.google.com/s2/favicons?sz=64&domain=biketerra.com
+// @grant         none
 // ==/UserScript==
 
 (function() {
@@ -504,12 +504,11 @@ window.spectateGroupLeader = function(groupIdx) {
         const id = r.riderId;
         const dist = window.__riderInterpolation?.[id]?.interpolatedDist || rawDist;
         r.lapDistance = dist >= 0 ? dist : 0;
+        // Apply Absolute Distance for sorting rebuild
+        r.absDistance = ((r.lap || 1) - 1) * globalLapLimit + r.lapDistance;
     });
 
-    riders.sort((a, b) => {
-        if (b.lap !== a.lap) return b.lap - a.lap;
-        return b.lapDistance - a.lapDistance;
-    });
+    riders.sort((a, b) => b.absDistance - a.absDistance);
 
     // Rebuild groups to find the correct one
     const groups = [];
@@ -521,9 +520,9 @@ window.spectateGroupLeader = function(groupIdx) {
             currentGroup.push(r);
         } else {
             const lastRider = currentGroup[currentGroup.length - 1];
-            const gap = lastRider.lapDistance - r.lapDistance;
+            const gap = lastRider.absDistance - r.absDistance;
 
-            if (gap <= GROUP_DISTANCE && r.lap === lastRider.lap) {
+            if (gap <= GROUP_DISTANCE) {
                 currentGroup.push(r);
             } else {
                 groups.push([...currentGroup]);
@@ -533,15 +532,8 @@ window.spectateGroupLeader = function(groupIdx) {
     });
     if (currentGroup.length > 0) groups.push(currentGroup);
 
-    // Sort groups the same way as the display
-    groups.forEach(g => {
-        g.leadLap = Math.max(...g.map(r => r.lap));
-        g.leadDist = Math.max(...g.map(r => r.lapDistance + (r.lap - 1) * globalLapLimit));
-    });
-    groups.sort((a, b) => {
-        if (b.leadLap !== a.leadLap) return b.leadLap - a.leadLap;
-        return b.leadDist - a.leadDist;
-    });
+    // Sort groups based on leader absolute distance
+    groups.sort((a, b) => b[0].absDistance - a[0].absDistance);
 
     if (groupIdx < groups.length) {
         const leader = groups[groupIdx][0]; // First rider is the leader
@@ -1061,7 +1053,7 @@ waitFor(".view-toggle").then(container => {
     }
 
     // --- Rider row renderer ---
-    function renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, focalRiderObj, globalLapLimit, isFinished = false) {
+    function renderRiderRow(r, referenceRiderId, referenceAbsDist, gm, focalRiderObj, globalLapLimit, isFinished = false) {
         let name;
         if (r.isFocal) {
             name = r.name || "Focus";
@@ -1084,17 +1076,9 @@ waitFor(".view-toggle").then(container => {
 
         if (r.riderId === referenceRiderId) {
             gapText = "0m";
-        } else if (r.lap !== referenceLap) {
-            // Calculate actual distance gap using lap information
-            const referenceTotalDist = (referenceLap - 1) * globalLapLimit + referenceDist;
-            const riderTotalDist = (r.lap - 1) * globalLapLimit + r.lapDistance;
-            const gapMeters = riderTotalDist - referenceTotalDist;
-
-            if (gapMeters === 0) gapText = "0m";
-            else if (gapMeters > 0) gapText = `+${Math.round(gapMeters)}m`;
-            else gapText = `${Math.round(gapMeters)}m`;
         } else {
-            const gapMeters = r.lapDistance - referenceDist;
+            // Use absolute distance for gaps to account for lap differences
+            const gapMeters = r.absDistance - referenceAbsDist;
             if (gapMeters === 0) gapText = "0m";
             else if (gapMeters > 0) gapText = `+${Math.round(gapMeters)}m`;
             else gapText = `${Math.round(gapMeters)}m`;
@@ -1110,20 +1094,20 @@ waitFor(".view-toggle").then(container => {
         if (ftp && r.power) {
             const ratio = r.power / ftp;
 
-            if (ratio >= 1.51) wkgColor = 'rgb(80, 72, 97)';       // Z7 Neuromuscular: 151%+
+            if (ratio >= 1.51) wkgColor = 'rgb(80, 72, 97)';       // Z7 Neuromuscular: 151%+
             else if (ratio >= 1.21) wkgColor = 'rgb(102, 51, 204)'; // Z6 Anaerobic: 121-150%
-            else if (ratio >= 1.06) wkgColor = 'rgb(221, 4, 71)';   // Z5 VO2 Max: 106-120%
+            else if (ratio >= 1.06) wkgColor = 'rgb(221, 4, 71)';   // Z5 VO2 Max: 106-120%
             else if (ratio >= 0.97) wkgColor = 'rgb(255, 127, 14)'; // Z4 Threshold: 97-105%
             else if (ratio >= 0.84) wkgColor = 'rgb(255, 160, 14)'; // SS Sweet Spot: 84-97%
             else if (ratio >= 0.76) wkgColor = 'rgb(255, 203, 14)'; // Z3 Tempo: 76-83%
-            else if (ratio >= 0.56) wkgColor = 'rgb(0, 158, 0)';    // Z2 Endurance: 56-75%
-            else wkgColor = 'rgb(0, 158, 128)';                     // Z1 Active Recovery: 0-55%
+            else if (ratio >= 0.56) wkgColor = 'rgb(0, 158, 0)';    // Z2 Endurance: 56-75%
+            else wkgColor = 'rgb(0, 158, 128)';                     // Z1 Active Recovery: 0-55%
         } else {
             // fallback if no FTP or power available
-            if (r.wkg >= 6.0) wkgColor = 'rgb(102, 51, 204)';      // Likely maximal effort
-            else if (r.wkg >= 4.0) wkgColor = 'rgb(221, 4, 71)';   // Hard effort
+            if (r.wkg >= 6.0) wkgColor = 'rgb(102, 51, 204)';      // Likely maximal effort
+            else if (r.wkg >= 4.0) wkgColor = 'rgb(221, 4, 71)';   // Hard effort
             else if (r.wkg >= 3.0) wkgColor = 'rgb(255, 127, 14)'; // Moderate effort
-            else wkgColor = 'rgb(0, 158, 128)';                    // Easy effort
+            else wkgColor = 'rgb(0, 158, 128)';                    // Easy effort
         }
 
         let helmetColor = "#444444";
@@ -1326,10 +1310,11 @@ if (window.__lastZoneUpdate[riderId] === undefined) {
         let leaderLap = 0;
         const gm = window.gameManager;
         const focalRiderObj = gm?.focalRider;
+        const ego = gm?.ego;
 
         // --- Get Global Map Info ---
-        const focalRef = riders.find(r => r.isFocal) || riders[0];
-        const globalLapLimit = 10000; // Default
+        const globalRoad = ego?.currentPath?.road || focalRiderObj?.currentPath?.road;
+        const globalLapLimit = globalRoad?.pathA?.distance || globalRoad?.pathB?.distance || 10000;
 
         // Get total laps
         const totalLaps = getTotalLaps();
@@ -1353,6 +1338,8 @@ if (window.__lastZoneUpdate[riderId] === undefined) {
 
             const dist = interpolateRider(id, rawDist, r.speed, r.isFocal);
             r.lapDistance = dist >= 0 ? dist : 0;
+            // Calculate absolute distance for cross-lap sorting and gaps
+            r.absDistance = ((r.lap || 1) - 1) * globalLapLimit + r.lapDistance;
 
             if (r.lap > leaderLap) leaderLap = r.lap;
 
@@ -1372,10 +1359,7 @@ if (window.__lastZoneUpdate[riderId] === undefined) {
             return timeA - timeB;
         });
 
-        activeRiders.sort((a, b) => {
-            if (b.lap !== a.lap) return b.lap - a.lap;
-            return b.lapDistance - a.lapDistance;
-        });
+        activeRiders.sort((a, b) => b.absDistance - a.absDistance);
 
         statusLight.innerText = "●";
         statusLight.style.color = "#00ff00";
@@ -1391,8 +1375,7 @@ if (window.__lastZoneUpdate[riderId] === undefined) {
         // Get reference rider ID (focal rider)
         const referenceRider = riders.find(r => r.isFocal) || activeRiders[0] || finishedRiders[0];
         const referenceRiderId = referenceRider?.riderId;
-        const referenceLap = referenceRider?.lap || 1;
-        const referenceDist = referenceRider?.lapDistance || 0;
+        const referenceAbsDist = referenceRider?.absDistance || 0;
 
         if (referenceRider) {
             displayPowerZonesForRider(referenceRider.riderId);
@@ -1434,9 +1417,9 @@ if (window.__lastZoneUpdate[riderId] === undefined) {
                         currentGroup.push(r);
                     } else {
                         const lastRider = currentGroup[currentGroup.length - 1];
-                        const gap = lastRider.lapDistance - r.lapDistance;
+                        const gap = lastRider.absDistance - r.absDistance;
 
-                        if (gap <= GROUP_DISTANCE && r.lap === lastRider.lap) {
+                        if (gap <= GROUP_DISTANCE) {
                             currentGroup.push(r);
                         } else {
                             groups.push([...currentGroup]);
@@ -1451,15 +1434,13 @@ if (window.__lastZoneUpdate[riderId] === undefined) {
                 });
             }
 
+            // Group absolute distance metadata
             groups.forEach(g => {
-                g.leadLap = Math.max(...g.map(r => r.lap));
-                g.leadDist = Math.max(...g.map(r => r.lapDistance + (r.lap - 1) * globalLapLimit));
+                g.leadAbsDist = g[0].absDistance;
+                g.leadLap = g[0].lap;
             });
 
-            groups.sort((a, b) => {
-                if (b.leadLap !== a.leadLap) return b.leadLap - a.leadLap;
-                return b.leadDist - a.leadDist;
-            });
+            groups.sort((a, b) => b.leadAbsDist - a.leadAbsDist);
 
             let breakaway = groups.length > 1 ? groups[0] : null;
             let peloton = groups.reduce((max, g) => g.length > max.length ? g : max, groups[0]);
@@ -1481,7 +1462,7 @@ if (window.__lastZoneUpdate[riderId] === undefined) {
                 html += `<tr class="finished-header-sticky" style="cursor:pointer; font-family:'Overpass',sans-serif;" onclick="event.stopPropagation(); window.toggleGroup('${groupId}');"><td colspan="7" style="padding:6px 10px; color:#fff; font-weight:bold;">${arrow} Finished - ${finishedRiders.length} riders (${onlineCount} online)</td></tr>`;
 
                 finishedRiders.forEach(r => {
-                    const riderRow = renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, focalRiderObj, globalLapLimit, true);
+                    const riderRow = renderRiderRow(r, referenceRiderId, referenceAbsDist, gm, focalRiderObj, globalLapLimit, true);
                     html += isExpanded ? riderRow : riderRow.replace('<tr style="', '<tr style="display:none; ');
                 });
                 html += `<tr style="height:4px;"><td colspan="7"></td></tr>`;
@@ -1499,7 +1480,7 @@ if (window.__lastZoneUpdate[riderId] === undefined) {
                 let groupTimeGap = "";
                 if (groupIdx > 0) {
                     const frontGroup = groups[0];
-                    const distGap = frontGroup.leadDist - group.leadDist;
+                    const distGap = frontGroup.leadAbsDist - group.leadAbsDist;
                     const frontAvg = frontGroup.reduce((sum, r) => sum + r.speed, 0) / frontGroup.length;
                     const thisAvg = group.reduce((sum, r) => sum + r.speed, 0) / group.length;
                     const avg = (frontAvg + thisAvg) / 2;
@@ -1512,7 +1493,7 @@ if (window.__lastZoneUpdate[riderId] === undefined) {
                 if (window.__tttDataLoaded && teamNames.size === 1 && group.length > 1) groupLabel = [...teamNames][0];
                 else if (breakaway && group === breakaway) groupLabel = `Breakaway - ${groupSize} riders`;
                 else if (peloton && group === peloton) groupLabel = `Peloton - ${groupSize} riders`;
-                else if (breakaway && peloton && group.leadDist < breakaway.leadDist && group.leadDist > peloton.leadDist) groupLabel = `Chase Group ${chaseCounter++} - ${groupSize} riders`;
+                else if (breakaway && peloton && group.leadAbsDist < breakaway.leadAbsDist && group.leadAbsDist > peloton.leadAbsDist) groupLabel = `Chase Group ${chaseCounter++} - ${groupSize} riders`;
                 else groupLabel = `Stragglers ${stragglersCounter++} - ${groupSize} riders`;
 
                 const arrow = isExpanded ? '▲' : '▼';
@@ -1520,7 +1501,7 @@ if (window.__lastZoneUpdate[riderId] === undefined) {
                 html += `<tr class="group-header-sticky" style="cursor:pointer; font-family:'Overpass',sans-serif;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;" onclick="if(event.ctrlKey) { window.spectateGroupLeader(${groupIdx}); } else { event.stopPropagation(); window.toggleGroup('${groupId}'); }"><td colspan="7" style="padding:6px 10px; color:#fff; font-weight:bold;">${arrow} ${groupLabel} (${avgSpeed} kph)${groupTimeGap}</td></tr>`;
 
                 group.forEach(r => {
-                    const riderRow = renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, focalRiderObj, globalLapLimit);
+                    const riderRow = renderRiderRow(r, referenceRiderId, referenceAbsDist, gm, focalRiderObj, globalLapLimit);
                     html += isExpanded ? riderRow : riderRow.replace('<tr style="', '<tr style="display:none; ');
                 });
                 html += `<tr style="height:4px;"><td colspan="7"></td></tr>`;
@@ -1530,10 +1511,10 @@ if (window.__lastZoneUpdate[riderId] === undefined) {
                 window.hackedRiders && window.hackedRiders.some(hr => hr.riderId === fr.riderId)
             );
             const allRiders = [...activeRiders, ...onlineFinishedRiders];
-            allRiders.sort((a, b) => b.lap !== a.lap ? b.lap - a.lap : b.lapDistance - a.lapDistance);
+            allRiders.sort((a, b) => b.absDistance - a.absDistance);
 
             allRiders.forEach(r => {
-                html += renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, focalRiderObj, globalLapLimit, window.__finishedRiders[r.riderId] !== undefined);
+                html += renderRiderRow(r, referenceRiderId, referenceAbsDist, gm, focalRiderObj, globalLapLimit, window.__finishedRiders[r.riderId] !== undefined);
             });
         }
 
@@ -1552,16 +1533,13 @@ if (window.__lastZoneUpdate[riderId] === undefined) {
                 if (trackCurrentGroup.length === 0) trackCurrentGroup.push(r);
                 else {
                     const last = trackCurrentGroup[trackCurrentGroup.length - 1];
-                    if (last.lapDistance - r.lapDistance <= GROUP_DISTANCE && r.lap === last.lap) trackCurrentGroup.push(r);
+                    // Using absDistance for accurate group tracking
+                    if (last.absDistance - r.absDistance <= GROUP_DISTANCE) trackCurrentGroup.push(r);
                     else { trackGroups.push([...trackCurrentGroup]); trackCurrentGroup = [r]; }
                 }
             });
             if (trackCurrentGroup.length > 0) trackGroups.push(trackCurrentGroup);
-            trackGroups.forEach(g => {
-                g.leadLap = Math.max(...g.map(r => r.lap));
-                g.leadDist = Math.max(...g.map(r => r.lapDistance + (r.lap - 1) * globalLapLimit));
-            });
-            trackGroups.sort((a, b) => b.leadLap !== a.leadLap ? b.leadLap - a.leadLap : b.leadDist - a.leadDist);
+            trackGroups.sort((a, b) => b[0].absDistance - a[0].absDistance);
 
             if (window.activeGroupSpectate < trackGroups.length) {
                 const trackedGroup = trackGroups[window.activeGroupSpectate];
