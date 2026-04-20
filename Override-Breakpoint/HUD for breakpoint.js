@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         Biketerra - Riderlist replacement HUD
 // @namespace    http://tampermonkey.net/
-// @version      14.8
-// @description  With time gaps for groups, sticky group headers, per-rider power zone tracking, and persistent race data across refreshes (Performance optimized - prevents interval accumulation, fixed TTT team detection)
+// @version      14.9
+// @description  Updated to prioritize Focal Rider over Ego for HUD metrics and highlighting
 // @author       You
 // @match        https://biketerra.com/ride*
 // @match        https://biketerra.com/spectate*
 // @exclude      https://biketerra.com/dashboard
-// @icon          https://www.google.com/s2/favicons?sz=64&domain=biketerra.com
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=biketerra.com
 // @grant        none
 // ==/UserScript==
 
@@ -842,26 +842,26 @@ waitFor(".view-toggle").then(container => {
         }, 1000);
     }
 
-    // Function to scroll to user's row
-    function scrollToUserRow() {
+    // Function to scroll to focal row
+    function scrollToFocalRow() {
         if (!autoScrollEnabled || !scrollContainer) return;
 
-        // Find the user's row (has the red outline)
-        const userRow = tbody.querySelector('tr[style*="outline: 2px solid #FF6262"]');
-        if (!userRow) return;
+        // Find the focal rider's row (isFocal = true)
+        const focalRow = tbody.querySelector('tr.focal-highlight');
+        if (!focalRow) return;
 
         // Mark that we're auto-scrolling
         scrollContainer.dataset.isAutoScrolling = 'true';
 
         const containerRect = scrollContainer.getBoundingClientRect();
-        const rowRect = userRow.getBoundingClientRect();
+        const rowRect = focalRow.getBoundingClientRect();
 
         // Calculate the center position
         const containerCenter = containerRect.top + (containerRect.height / 2);
         const rowCenter = rowRect.top + (rowRect.height / 2);
         const scrollOffset = rowCenter - containerCenter;
 
-        // Smooth scroll to center the user's row
+        // Smooth scroll to center the focal rider's row
         scrollContainer.scrollBy({
             top: scrollOffset,
             behavior: 'smooth'
@@ -952,7 +952,7 @@ waitFor(".view-toggle").then(container => {
     // --- Interpolation state for smoother updates ---
     window.__riderInterpolation = window.__riderInterpolation || {};
 
-    function interpolateRider(riderId, currentDist, currentSpeed, isMe) {
+    function interpolateRider(riderId, currentDist, currentSpeed, isFocal) {
         const now = Date.now();
 
         if (!window.__riderInterpolation[riderId]) {
@@ -961,7 +961,7 @@ waitFor(".view-toggle").then(container => {
                 lastSpeed: currentSpeed,
                 lastUpdate: now,
                 interpolatedDist: currentDist,
-                isMe: isMe
+                isFocal: isFocal
             };
             return currentDist;
         }
@@ -976,7 +976,7 @@ waitFor(".view-toggle").then(container => {
             interp.lastSpeed = currentSpeed;
             interp.lastUpdate = now;
             interp.interpolatedDist = currentDist;
-            interp.isMe = isMe;
+            interp.isFocal = isFocal;
             return currentDist;
         }
 
@@ -988,9 +988,7 @@ waitFor(".view-toggle").then(container => {
             return interp.interpolatedDist;
         }
 
-        // Apply the same interpolation logic to ALL riders (including isMe)
-        // This ensures consistent position calculations across all riders
-        // Speed is in m/s, time is in ms, so: distance = speed * (time / 1000)
+        // Apply interpolation logic
         const interpolatedDistance = interp.lastDist + (interp.lastSpeed * (timeSinceUpdate / 1000));
         interp.interpolatedDist = interpolatedDistance;
 
@@ -1002,14 +1000,11 @@ waitFor(".view-toggle").then(container => {
         if (!gm) return null;
 
         let human = null;
-        const ego = gm.ego;
         const focalRider = gm.focalRider;
         const humans = gm.humans || {};
 
         // Find the human object for this rider
-        if (ego && (ego.athleteId === riderId || ego.id === riderId)) {
-            human = ego;
-        } else if (focalRider && (focalRider.athleteId === riderId || focalRider.id === riderId)) {
+        if (focalRider && (focalRider.athleteId === riderId || focalRider.id === riderId)) {
             human = focalRider;
         } else if (humans[riderId]) {
             human = humans[riderId];
@@ -1066,17 +1061,19 @@ waitFor(".view-toggle").then(container => {
     }
 
     // --- Rider row renderer ---
-    function renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit, isFinished = false) {
+    function renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, focalRiderObj, globalLapLimit, isFinished = false) {
         let name;
-        if (r.isMe && ego) {
-            name = ego.name || r.name || "You";
+        if (r.isFocal) {
+            name = r.name || "Focus";
         } else {
             name = r.name || "Unknown";
         }
 
-        const highlightStyle = r.isMe
+        const highlightStyle = r.isFocal
             ? "outline: 2px solid #FF6262; outline-offset: -2px; box-shadow: 0 0 4px #FF6262;"
             : "";
+
+        const focalClass = r.isFocal ? "focal-highlight" : "";
 
         const dist = r.lapDistance.toFixed(2);
         const speed = (r.speed * 3.6).toFixed(1);
@@ -1107,11 +1104,7 @@ waitFor(".view-toggle").then(container => {
         let ftp;
 
         // Determine correct FTP
-        if (r.isMe && window.gameManager?.ego?.userData?.ftp) {
-            ftp = window.gameManager.ego.userData.ftp;
-        } else {
-            ftp = window.__athleteFtpMap[r.riderId];
-        }
+        ftp = window.__athleteFtpMap[r.riderId];
 
         // Compute W/kg color based on Intervals.icu power zones
         if (ftp && r.power) {
@@ -1136,18 +1129,11 @@ waitFor(".view-toggle").then(container => {
         let helmetColor = "#444444";
         const gmHumans = gm?.humans || {};
 
-        if (r.isMe) {
-            if (ego) {
-                 helmetColor = ego?.entity?.design?.helmet_color
-                            || ego?.config?.design?.helmet_color
-                            || ego?.helmet_color
-                            || helmetColor;
-            } else if (focalRiderObj) {
-                const focalId = focalRiderObj.athleteId || focalRiderObj.id;
-                const targetHuman = gmHumans[focalId] || Object.values(gmHumans).find(h => (h.athleteId || h.id) == focalId);
-                if (targetHuman) {
-                    helmetColor = targetHuman?.config?.design?.helmet_color || helmetColor;
-                }
+        if (r.isFocal) {
+            const focalId = r.riderId;
+            const targetHuman = gmHumans[focalId] || Object.values(gmHumans).find(h => (h.athleteId || h.id) == focalId);
+            if (targetHuman) {
+                helmetColor = targetHuman?.config?.design?.helmet_color || helmetColor;
             }
         } else {
             if (gmHumans[r.riderId]?.config?.design?.helmet_color) {
@@ -1174,15 +1160,15 @@ waitFor(".view-toggle").then(container => {
         const rowStyle = `
             border-bottom:1px solid #333;
             background:${bgColor};
-            cursor:${r.isMe ? "default" : "pointer"};
+            cursor:${r.isFocal ? "default" : "pointer"};
             ${highlightStyle}
         `;
 
         // FIXED: Handle rider ID 0 in onclick
-        const onclickAttr = r.isMe ? "" : `onclick="window.spectateRiderById(${r.riderId})"`;
+        const onclickAttr = r.isFocal ? "" : `onclick="window.spectateRiderById(${r.riderId})"`;
 
         return `
-            <tr style="${rowStyle}" ${onclickAttr}>
+            <tr style="${rowStyle}" class="${focalClass}" ${onclickAttr}>
                 <td style="padding:4px 4px 4px 10px;font-size:13px; color:#fff;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${name}</td>
                 <td style="padding:4px;font-size:13px;color:#fff; font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${power}</td>
                 <td style="padding:4px;font-size:13px;color:#fff;font-family:Overpass Mono, monospace;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;">${speed}</td>
@@ -1225,20 +1211,10 @@ waitFor(".view-toggle").then(container => {
             window.__riderPowerZones[riderId] = {
                 z1: 0, z2: 0, z3: 0, ss: 0, z4: 0, z5: 0, z6: 0, z7: 0
             };
-            console.log(`🎯 Initialized power zone tracking for rider ${riderId}`);
         }
 
 if (window.__lastZoneUpdate[riderId] === undefined) {
         window.__lastZoneUpdate[riderId] = now;
-
-        // Check if this is truly new or if we have existing zone data (from restoration)
-        const hasExistingData = Object.values(window.__riderPowerZones[riderId]).some(v => v > 0);
-        if (hasExistingData) {
-            console.log(`📊 Restored power zone data for rider ${riderId}:`, window.__riderPowerZones[riderId]);
-        } else {
-            console.log(`⏱️ Starting zone timer for NEW rider ${riderId}`);
-        }
-
         return; // Skip first update to establish baseline
     }
 
@@ -1315,42 +1291,6 @@ if (window.__lastZoneUpdate[riderId] === undefined) {
         });
     }
 
-function autoFitTableText(tbody, options = {}) {
-    const {
-        minFontSize = 9,
-        maxFontSize = 15,
-        step = 0.5
-    } = options;
-
-    const rows = tbody.querySelectorAll('tr');
-
-    rows.forEach(row => {
-        const cells = row.children;
-        if (!cells) return;
-
-        [...cells].forEach(cell => {
-            // Skip group headers / spacers
-            if (cell.colSpan > 1) return;
-
-            const style = window.getComputedStyle(cell);
-            let fontSize = parseFloat(style.fontSize);
-
-            // Reset first so shrinking is repeatable
-            fontSize = Math.min(fontSize, maxFontSize);
-            cell.style.fontSize = fontSize + 'px';
-
-            // Shrink until it fits or we hit min size
-            while (
-                cell.scrollWidth > cell.clientWidth &&
-                fontSize > minFontSize
-            ) {
-                fontSize -= step;
-                cell.style.fontSize = fontSize + 'px';
-            }
-        });
-    });
-}
-
     // ============================================================================
     // MAIN RENDER LOOP - USING TRACKED INTERVAL
     // ============================================================================
@@ -1365,8 +1305,7 @@ function autoFitTableText(tbody, options = {}) {
 
         let riders = window.hackedRiders ? [...window.hackedRiders] : [];
 
-        // Add back any finished riders that are no longer in hackedRiders
-        // Finished riders should always be shown, even if they've left the event
+        // Add finished riders
         Object.keys(window.__finishedRiders).forEach(finishedId => {
             if (!riders.find(r => r.riderId == finishedId)) {
                 const storedData = window.__finishedRiders[finishedId].riderData;
@@ -1376,7 +1315,6 @@ function autoFitTableText(tbody, options = {}) {
             }
         });
 
-        // If we have no riders at all, show waiting message
         if (riders.length === 0) {
             statusLight.innerText = "●";
             statusLight.style.color = "orange";
@@ -1386,19 +1324,16 @@ function autoFitTableText(tbody, options = {}) {
         queueRidersForFtp(riders);
 
         let leaderLap = 0;
-
         const gm = window.gameManager;
-        const ego = gm?.ego;
         const focalRiderObj = gm?.focalRider;
 
         // --- Get Global Map Info ---
-        const globalRoad = ego?.currentPath?.road || focalRiderObj?.currentPath?.road;
-        const globalLapLimit = globalRoad?.pathA?.distance || globalRoad?.pathB?.distance || 10000; // Default 10k
+        const focalRef = riders.find(r => r.isFocal) || riders[0];
+        const globalLapLimit = 10000; // Default
 
-        // Get total laps to detect already-finished riders
+        // Get total laps
         const totalLaps = getTotalLaps();
 
-        // Separate finished and active riders
         const finishedRiders = [];
         const activeRiders = [];
 
@@ -1406,34 +1341,22 @@ function autoFitTableText(tbody, options = {}) {
             const rawDist = r.dist;
             const id = r.riderId;
 
-            // Check if rider has finished (either already marked OR lap is beyond total laps)
             let isFinished = window.__finishedRiders[id] !== undefined;
 
-            // Also check if rider has already completed all laps (for riders who finished before spectating started)
             if (!isFinished && r.lap > totalLaps) {
                 isFinished = true;
-                // Mark them as finished now
                 window.__finishedRiders[id] = {
-                    finishTime: Date.now() - (r.lap - totalLaps) * 60000, // Estimate earlier finish time
+                    finishTime: Date.now() - (r.lap - totalLaps) * 60000,
                     riderData: { ...r }
                 };
-                console.log(`🏁 Rider ${id} (${r.name}) was already finished when spectating started`);
             }
 
-            // Apply interpolation to smooth out position updates
-            const dist = interpolateRider(id, rawDist, r.speed, r.isMe);
-
-            // Use native lapCount from Biketerra (starts at 0, so add 1 for display)
-            // The lap count is already set in the breakpoint, just use it directly
-            const displayLap = r.lap; // Already incremented in breakpoint (+1)
-
+            const dist = interpolateRider(id, rawDist, r.speed, r.isFocal);
             r.lapDistance = dist >= 0 ? dist : 0;
 
-            if (displayLap > leaderLap) leaderLap = displayLap;
+            if (r.lap > leaderLap) leaderLap = r.lap;
 
-            // Split into finished vs active
             if (isFinished) {
-                // Update the stored rider data with current live data
                 window.__finishedRiders[id].riderData = { ...r };
                 finishedRiders.push(r);
             } else {
@@ -1441,17 +1364,14 @@ function autoFitTableText(tbody, options = {}) {
             }
         });
 
-        // Check for race finishes
         checkForRaceFinish(riders);
 
-        // Sort finished riders by finish time (earliest first)
         finishedRiders.sort((a, b) => {
             const timeA = window.__finishedRiders[a.riderId]?.finishTime || 0;
             const timeB = window.__finishedRiders[b.riderId]?.finishTime || 0;
             return timeA - timeB;
         });
 
-        // Sort active riders by lap and distance
         activeRiders.sort((a, b) => {
             if (b.lap !== a.lap) return b.lap - a.lap;
             return b.lapDistance - a.lapDistance;
@@ -1460,47 +1380,23 @@ function autoFitTableText(tbody, options = {}) {
         statusLight.innerText = "●";
         statusLight.style.color = "#00ff00";
 
-        // --- Track power zones for ALL riders ---
+        // --- Track power zones ---
         riders.forEach(r => {
-            let ftp = null;
-
-            // Get FTP for this rider
-            if (r.isMe && ego?.userData?.ftp) {
-                ftp = ego.userData.ftp;
-            } else if (window.__athleteFtpMap[r.riderId] !== undefined) {
-                ftp = window.__athleteFtpMap[r.riderId];
-            }
-
-            // Update tracking for this rider
-            // FIXED: Explicit check for rider ID and power
+            let ftp = window.__athleteFtpMap[r.riderId];
             if (ftp && r.power && (r.riderId === 0 || r.riderId)) {
                 updatePowerZoneTracking(r, ftp);
             }
         });
 
-        // Get reference rider ID (ego or focal rider)
-        let referenceRiderId = null;
-        if (ego) {
-            referenceRiderId = ego.athleteId || ego.id;
-        } else if (focalRiderObj) {
-            referenceRiderId = focalRiderObj.athleteId || focalRiderObj.id;
-        }
+        // Get reference rider ID (focal rider)
+        const referenceRider = riders.find(r => r.isFocal) || activeRiders[0] || finishedRiders[0];
+        const referenceRiderId = referenceRider?.riderId;
+        const referenceLap = referenceRider?.lap || 1;
+        const referenceDist = referenceRider?.lapDistance || 0;
 
-        // Find reference rider in active riders first, then finished riders, then default to first available rider
-        let referenceRider = activeRiders.find(r => r.riderId === referenceRiderId);
-        if (!referenceRider) {
-            referenceRider = finishedRiders.find(r => r.riderId === referenceRiderId);
-        }
-        if (!referenceRider) {
-            referenceRider = activeRiders[0] || finishedRiders[0];
-        }
-
-        // Display power zones for the reference rider (the one we're watching)
         if (referenceRider) {
             displayPowerZonesForRider(referenceRider.riderId);
         }
-        const referenceLap = referenceRider?.lap || 1;
-        const referenceDist = referenceRider?.lapDistance || 0;
 
         let html = '';
 
@@ -1508,31 +1404,21 @@ function autoFitTableText(tbody, options = {}) {
             const groups = [];
             const ungroupedRiders = [...activeRiders];
 
-            // --- 1. Build TTT team groups FIRST (if TTT data is loaded) ---
             if (window.__tttDataLoaded) {
                 const teamGroups = {};
-
-                // Group riders by team - try multiple key formats
                 activeRiders.forEach(r => {
                     const id = r.riderId;
-                    // Try multiple formats: string, number, and both with/without type coercion
-                    let teamName = window.__tttTeamMap[String(id)]
-                                || window.__tttTeamMap[id]
-                                || window.__tttTeamMap[String(id).toString()];
+                    let teamName = window.__tttTeamMap[String(id)] || window.__tttTeamMap[id];
 
                     if (teamName) {
-                        if (!teamGroups[teamName]) {
-                            teamGroups[teamName] = [];
-                        }
+                        if (!teamGroups[teamName]) teamGroups[teamName] = [];
                         teamGroups[teamName].push(r);
                     }
                 });
 
-                // Add team groups to main groups array and remove from ungrouped
                 Object.entries(teamGroups).forEach(([teamName, teamRiders]) => {
                     if (teamRiders.length > 0) {
                         groups.push(teamRiders);
-                        // Remove these riders from ungrouped list
                         teamRiders.forEach(tr => {
                             const idx = ungroupedRiders.findIndex(ur => ur.riderId === tr.riderId);
                             if (idx !== -1) ungroupedRiders.splice(idx, 1);
@@ -1541,9 +1427,6 @@ function autoFitTableText(tbody, options = {}) {
                 });
             }
 
-            // --- 2. Build distance-based groups from remaining riders ---
-            // ONLY do distance-based grouping if this is NOT a TTT race
-            // In TTT races, ALL riders should be in team groups, so skip distance grouping
             if (!window.__tttDataLoaded) {
                 let currentGroup = [];
                 ungroupedRiders.forEach((r, idx) => {
@@ -1563,83 +1446,47 @@ function autoFitTableText(tbody, options = {}) {
                 });
                 if (currentGroup.length > 0) groups.push(currentGroup);
             } else {
-                // In TTT races, if there are any ungrouped riders, create individual groups for them
-                // (This handles edge cases where a rider might not be in the TTT data)
                 ungroupedRiders.forEach(r => {
                     groups.push([r]);
                 });
             }
 
-            // --- 3. Compute lead distance and lap for each group ---
             groups.forEach(g => {
                 g.leadLap = Math.max(...g.map(r => r.lap));
                 g.leadDist = Math.max(...g.map(r => r.lapDistance + (r.lap - 1) * globalLapLimit));
             });
 
-            // --- 4. Sort groups by lap then distance, Identify Breakaway (front-most group) ---
             groups.sort((a, b) => {
                 if (b.leadLap !== a.leadLap) return b.leadLap - a.leadLap;
                 return b.leadDist - a.leadDist;
             });
 
-            let breakaway = null;
-            let peloton = null;
+            let breakaway = groups.length > 1 ? groups[0] : null;
+            let peloton = groups.reduce((max, g) => g.length > max.length ? g : max, groups[0]);
 
-            // Only process groups if we have active riders
-            if (groups.length > 0) {
-                // If only one group, it's the peloton
-                if (groups.length === 1) {
-                    peloton = groups[0];
-                } else {
-                    breakaway = groups[0];
-
-                    // --- 5. Identify Peloton (largest group) ---
-                    peloton = groups.reduce((max, g) => g.length > max.length ? g : max, groups[0]);
-
-                    // --- 6. Ensure only 1 Peloton ---
-                    if (breakaway.length > peloton.length) {
-                        let temp = peloton;
-                        peloton = breakaway;
-                        breakaway = temp;
-                    }
-                }
+            if (breakaway && breakaway.length > peloton.length) {
+                let temp = peloton;
+                peloton = breakaway;
+                breakaway = temp;
             }
 
-            // --- 7. Render Finished group first if there are finished riders ---
             if (finishedRiders.length > 0) {
                 const groupId = 'group-finished';
                 const isExpanded = !expandedGroups.has(groupId + '-collapsed');
                 const arrow = isExpanded ? '▲' : '▼';
-
-                // Count how many finished riders are still in window.hackedRiders (actively connected)
-                // Don't use 'riders' array since that includes stored finished riders
                 const onlineCount = finishedRiders.filter(fr =>
                     window.hackedRiders && window.hackedRiders.some(hr => hr.riderId === fr.riderId)
                 ).length;
 
-                html += `
-                    <tr class="finished-header-sticky" style="cursor:pointer; font-family:'Overpass',sans-serif;"
-                        onclick="event.stopPropagation(); window.toggleGroup('${groupId}');"
-                        title="Click to expand/collapse">
-                        <td colspan="7" style="padding:6px 10px; color:#fff; font-weight:bold;">
-                            ${arrow} Finished - ${finishedRiders.length} rider${finishedRiders.length>1?'s':''} (${onlineCount} online)
-                        </td>
-                    </tr>
-                `;
+                html += `<tr class="finished-header-sticky" style="cursor:pointer; font-family:'Overpass',sans-serif;" onclick="event.stopPropagation(); window.toggleGroup('${groupId}');"><td colspan="7" style="padding:6px 10px; color:#fff; font-weight:bold;">${arrow} Finished - ${finishedRiders.length} riders (${onlineCount} online)</td></tr>`;
 
                 finishedRiders.forEach(r => {
-                    const riderRow = renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit, true);
-                    if (!isExpanded) {
-                        html += riderRow.replace('<tr style="', '<tr style="display:none; ');
-                    } else {
-                        html += riderRow;
-                    }
+                    const riderRow = renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, focalRiderObj, globalLapLimit, true);
+                    html += isExpanded ? riderRow : riderRow.replace('<tr style="', '<tr style="display:none; ');
                 });
-
                 html += `<tr style="height:4px;"><td colspan="7"></td></tr>`;
             }
 
-            // --- 8. Render active groups ---
             let chaseCounter = 1;
             let stragglersCounter = 1;
 
@@ -1649,209 +1496,88 @@ function autoFitTableText(tbody, options = {}) {
                 const groupId = `group-${groupIdx}`;
                 const isExpanded = !expandedGroups.has(groupId + '-collapsed');
 
-                // Calculate time gap for this group
                 let groupTimeGap = "";
                 if (groupIdx > 0) {
-                    // Calculate distance gap to the front group
                     const frontGroup = groups[0];
-                    const frontGroupLeadDist = frontGroup.leadDist;
-                    const thisGroupLeadDist = group.leadDist;
-                    const distGap = frontGroupLeadDist - thisGroupLeadDist;
-
-                    // Use the average speed of both groups for time calculation
-                    const frontGroupAvgSpeed = frontGroup.reduce((sum, r) => sum + r.speed, 0) / frontGroup.length;
-                    const thisGroupAvgSpeed = group.reduce((sum, r) => sum + r.speed, 0) / group.length;
-                    const avgSpeedBoth = (frontGroupAvgSpeed + thisGroupAvgSpeed) / 2;
-
-                    const timeGap = calculateTimeGap(distGap, avgSpeedBoth, avgSpeedBoth);
-                    groupTimeGap = ` +${formatTimeGap(timeGap)}`;
+                    const distGap = frontGroup.leadDist - group.leadDist;
+                    const frontAvg = frontGroup.reduce((sum, r) => sum + r.speed, 0) / frontGroup.length;
+                    const thisAvg = group.reduce((sum, r) => sum + r.speed, 0) / group.length;
+                    const avg = (frontAvg + thisAvg) / 2;
+                    groupTimeGap = ` +${formatTimeGap(calculateTimeGap(distGap, avg, avg))}`;
                 }
 
-                // Determine group label
                 let groupLabel = "";
+                const teamNames = new Set(group.map(r => window.__tttTeamMap[String(r.riderId)]).filter(Boolean));
 
-                // Check if this is a TTT team group
-                const teamNames = new Set(
-                    group
-                        .map(r => window.__tttTeamMap[String(r.riderId)])
-                        .filter(Boolean)
-                );
-                const isTTTTeam = window.__tttDataLoaded && teamNames.size === 1 && group.length > 1;
-
-                if (isTTTTeam) {
-                    groupLabel = [...teamNames][0];
-                } else if (breakaway && group === breakaway) {
-                    groupLabel = `Breakaway - ${groupSize} rider${groupSize>1?'s':''}`;
-                } else if (peloton && group === peloton) {
-                    groupLabel = `Peloton - ${groupSize} rider${groupSize>1?'s':''}`;
-                } else if (breakaway && peloton && group.leadDist < breakaway.leadDist && group.leadDist > peloton.leadDist) {
-                    groupLabel = `Chase Group ${chaseCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
-                } else {
-                    groupLabel = `Stragglers ${stragglersCounter++} - ${groupSize} rider${groupSize>1?'s':''}`;
-                }
+                if (window.__tttDataLoaded && teamNames.size === 1 && group.length > 1) groupLabel = [...teamNames][0];
+                else if (breakaway && group === breakaway) groupLabel = `Breakaway - ${groupSize} riders`;
+                else if (peloton && group === peloton) groupLabel = `Peloton - ${groupSize} riders`;
+                else if (breakaway && peloton && group.leadDist < breakaway.leadDist && group.leadDist > peloton.leadDist) groupLabel = `Chase Group ${chaseCounter++} - ${groupSize} riders`;
+                else groupLabel = `Stragglers ${stragglersCounter++} - ${groupSize} riders`;
 
                 const arrow = isExpanded ? '▲' : '▼';
 
-                // Always show group header with sticky positioning
-                html += `
-                    <tr class="group-header-sticky" style="cursor:pointer; font-family:'Overpass',sans-serif;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;"
-                        onclick="if(event.ctrlKey) { window.spectateGroupLeader(${groupIdx}); } else { event.stopPropagation(); window.toggleGroup('${groupId}'); }"
-                        title="Click to expand/collapse, Ctrl+Click to spectate leader">
-                        <td colspan="7" style="padding:6px 10px; color:#fff; font-weight:bold;">
-                            ${arrow} ${groupLabel} (${avgSpeed} kph)${groupTimeGap}
-                        </td>
-                    </tr>
-                `;
+                html += `<tr class="group-header-sticky" style="cursor:pointer; font-family:'Overpass',sans-serif;text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000;" onclick="if(event.ctrlKey) { window.spectateGroupLeader(${groupIdx}); } else { event.stopPropagation(); window.toggleGroup('${groupId}'); }"><td colspan="7" style="padding:6px 10px; color:#fff; font-weight:bold;">${arrow} ${groupLabel} (${avgSpeed} kph)${groupTimeGap}</td></tr>`;
 
-                // Render each rider in the group with proper display toggle
                 group.forEach(r => {
-                    const riderRow = renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit);
-                    // Add display style to the row if group is collapsed
-                    if (!isExpanded) {
-                        html += riderRow.replace('<tr style="', '<tr style="display:none; ');
-                    } else {
-                        html += riderRow;
-                    }
+                    const riderRow = renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, focalRiderObj, globalLapLimit);
+                    html += isExpanded ? riderRow : riderRow.replace('<tr style="', '<tr style="display:none; ');
                 });
-
                 html += `<tr style="height:4px;"><td colspan="7"></td></tr>`;
             });
         } else {
-            // Individual view - sort all riders (active + finished) normally by position
-            // BUT only include finished riders who are still online
             const onlineFinishedRiders = finishedRiders.filter(fr =>
                 window.hackedRiders && window.hackedRiders.some(hr => hr.riderId === fr.riderId)
             );
-
             const allRiders = [...activeRiders, ...onlineFinishedRiders];
-
-            // Sort by lap and distance (finished riders will naturally be at top since they're on lap+1)
-            allRiders.sort((a, b) => {
-                if (b.lap !== a.lap) return b.lap - a.lap;
-                return b.lapDistance - a.lapDistance;
-            });
+            allRiders.sort((a, b) => b.lap !== a.lap ? b.lap - a.lap : b.lapDistance - a.lapDistance);
 
             allRiders.forEach(r => {
-                const isFinished = window.__finishedRiders[r.riderId] !== undefined;
-                html += renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, ego, focalRiderObj, globalLapLimit, isFinished);
+                html += renderRiderRow(r, referenceRiderId, referenceLap, referenceDist, gm, focalRiderObj, globalLapLimit, window.__finishedRiders[r.riderId] !== undefined);
             });
         }
 
-        // PERFORMANCE: Only update DOM if HTML actually changed
-        if (!window.__lastTableHTML || window.__lastTableHTML !== html) {
+        if (window.__lastTableHTML !== html) {
             tbody.innerHTML = html;
             window.__lastTableHTML = html;
         }
 
-        // PERFORMANCE FIX: autoFitTableText disabled - was causing 3-second freezes
-        // The table uses table-layout:fixed with set column widths, so auto-fitting isn't necessary
-        // If text overflow becomes an issue, re-enable this but throttle it heavily (once per 30s)
-        /*
-        const now = Date.now();
-        if (!window.__lastAutoFit || now - window.__lastAutoFit > 30000) {
-            autoFitTableText(tbody, {
-                minFontSize: 9,
-                maxFontSize: 15,
-                step: 0.5
-            });
-            window.__lastAutoFit = now;
-        }
-        */
-
-        // Update sticky header visibility after render
         manageStickyHeaders();
+        scrollToFocalRow();
 
-        // Auto-scroll to user's row if enabled
-        scrollToUserRow();
-
-        // --- Auto-update group spectate if active ---
         if (window.activeGroupSpectate !== null) {
-            // Rebuild groups the same way as display
             const trackGroups = [];
             let trackCurrentGroup = [];
-
-            activeRiders.forEach((r, idx) => {
-                if (trackCurrentGroup.length === 0) {
-                    trackCurrentGroup.push(r);
-                } else {
-                    const lastRider = trackCurrentGroup[trackCurrentGroup.length - 1];
-                    const gap = lastRider.lapDistance - r.lapDistance;
-
-                    if (gap <= GROUP_DISTANCE && r.lap === lastRider.lap) {
-                        trackCurrentGroup.push(r);
-                    } else {
-                        trackGroups.push([...trackCurrentGroup]);
-                        trackCurrentGroup = [r];
-                    }
+            activeRiders.forEach((r) => {
+                if (trackCurrentGroup.length === 0) trackCurrentGroup.push(r);
+                else {
+                    const last = trackCurrentGroup[trackCurrentGroup.length - 1];
+                    if (last.lapDistance - r.lapDistance <= GROUP_DISTANCE && r.lap === last.lap) trackCurrentGroup.push(r);
+                    else { trackGroups.push([...trackCurrentGroup]); trackCurrentGroup = [r]; }
                 }
             });
             if (trackCurrentGroup.length > 0) trackGroups.push(trackCurrentGroup);
-
-            // Sort groups the same way
             trackGroups.forEach(g => {
                 g.leadLap = Math.max(...g.map(r => r.lap));
                 g.leadDist = Math.max(...g.map(r => r.lapDistance + (r.lap - 1) * globalLapLimit));
             });
-            trackGroups.sort((a, b) => {
-                if (b.leadLap !== a.leadLap) return b.leadLap - a.leadLap;
-                return b.leadDist - a.leadDist;
-            });
+            trackGroups.sort((a, b) => b.leadLap !== a.leadLap ? b.leadLap - a.leadLap : b.leadDist - a.leadDist);
 
-            // Check if the group still exists and update spectate target
             if (window.activeGroupSpectate < trackGroups.length) {
                 const trackedGroup = trackGroups[window.activeGroupSpectate];
                 const currentLeader = trackedGroup[0];
-
-                // Store last leader to track changes
-                if (!window.__lastGroupLeader) {
-                    window.__lastGroupLeader = currentLeader.riderId;
-                }
-
-                // Check if current leader is still in the tracked group
+                if (!window.__lastGroupLeader) window.__lastGroupLeader = currentLeader.riderId;
                 const lastLeaderInGroup = trackedGroup.some(r => r.riderId === window.__lastGroupLeader);
-
-                if (!lastLeaderInGroup) {
-                    // Last leader left the group, switch to new leader
+                if (!lastLeaderInGroup || currentLeader.riderId !== window.__lastGroupLeader) {
                     window.__lastGroupLeader = currentLeader.riderId;
-                    if (gm && typeof gm.setFocalRider === 'function') {
-                        gm.setFocalRider(currentLeader.riderId);
-                    }
-                } else if (currentLeader.riderId !== window.__lastGroupLeader) {
-                    // Leader changed but old leader still in group (someone attacked)
-                    window.__lastGroupLeader = currentLeader.riderId;
-                    if (gm && typeof gm.setFocalRider === 'function') {
-                        gm.setFocalRider(currentLeader.riderId);
-                    }
+                    if (gm && typeof gm.setFocalRider === 'function') gm.setFocalRider(currentLeader.riderId);
                 }
             } else {
-                // Group no longer exists at the tracked index
-                // Check if last leader is still in any group (solo or with others)
-                const lastLeaderRider = activeRiders.find(r => r.riderId === window.__lastGroupLeader);
-                if (lastLeaderRider) {
-                    // Leader still exists, stay with them but stop group tracking
-                    window.activeGroupSpectate = null;
-                    window.__lastGroupLeader = null;
-                } else {
-                    // Leader doesn't exist anymore, stop tracking
-                    window.activeGroupSpectate = null;
-                    window.__lastGroupLeader = null;
-                }
+                window.activeGroupSpectate = null;
+                window.__lastGroupLeader = null;
             }
         }
+    }, 1000);
 
-        const perfEnd = performance.now();
-        const renderTime = perfEnd - perfStart;
-
-        // Log if render took longer than 100ms
-        if (renderTime > 100) {
-            console.warn(`⚠️ Slow render: ${renderTime.toFixed(2)}ms (${riders.length} riders)`);
-        }
-
-    }, 1000); // Reduced from 500ms - smoother performance
-
-    // ============================================================================
-    // FTP QUEUE PROCESSOR - USING TRACKED INTERVAL
-    // ============================================================================
     addTrackedInterval(processFtpQueue, 1000);
-
 })();
