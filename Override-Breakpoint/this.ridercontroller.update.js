@@ -1,5 +1,5 @@
 // ============================================================================
-// BIKETERRA DATA EXTRACTOR - ZERO-SAFE PATHID SYNC
+// BIKETERRA DATA EXTRACTOR - FOCAL RIDER & SPECTATOR SYNC
 // ============================================================================
 
 try {
@@ -33,12 +33,16 @@ try {
             const state = rider.entity?.state || {};
             const isMe = entry.isMe || (rider === ego);
             
-            // Identity
+            // Identity & ID resolution
             const rId = isMe ? (ego.userData?.id || entry.id) : (rider.athleteId || entry.id);
             const ud = isMe ? (ego.userData || {}) : (rider.config || {});
             const design = rider.entity?.design || {};
             
             const rName = `${ud.first_name || ""} ${ud.last_name || ""}`.trim() || (isMe ? "Me" : `Rider ${rId}`);
+
+            // Focal Rider Logic
+            // We check the specific state property you confirmed.
+            const isFocal = state.isFocalRider ?? (gm.focalRider === rider) ?? false;
 
             // Stats
             const dist = state.currentPathDistance ?? rider.currentPathDistance ?? 0;
@@ -46,9 +50,7 @@ try {
             const weightGrams = isMe ? (ego.userData?.weight) : (rider.config?.weight);
             const wkg = weightGrams > 0 ? (watts / (weightGrams / 1000)) : (state.smoothWkg ?? 0);
 
-            // --- ZERO-SAFE PATHID LOOKUP ---
-            // Using ?? (Nullish Coalescing) instead of || (Logical OR)
-            // This ensures that 0 is treated as a valid value and not skipped.
+            // PathID (Zero-safe)
             const pId = state.currentPath?.id ?? rider.currentPath?.id ?? null;
 
             // Distance Tracking
@@ -72,10 +74,11 @@ try {
                 cadence: state.cadence || 0,
                 heartRate: state.heartRate || 0,
                 isMe: isMe,
+                isFocal: isFocal, // New flag for spectating/focus
                 riderId: rId,
                 helmet: design.helmet_color,
                 skin: design.skin_color,
-                pathID: pId, // Now correctly returns 0 or 1
+                pathID: pId,
                 _timestamp: now
             });
         } catch (e) { continue; }
